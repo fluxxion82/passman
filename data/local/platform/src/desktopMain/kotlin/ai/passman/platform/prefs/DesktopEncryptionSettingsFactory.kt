@@ -2,6 +2,7 @@ package ai.passman.platform.prefs
 
 import ai.passman.repo.DesktopProfile
 import ai.passman.logging.KLogger
+import com.microsoft.credentialstorage.SecretStore
 import com.microsoft.credentialstorage.StorageProvider
 import com.microsoft.credentialstorage.model.StoredCredential
 import com.russhwolf.settings.PreferencesSettings
@@ -24,7 +25,16 @@ import kotlin.random.asKotlinRandom
 
 private const val MASTER_KEY_USER = "passman"
 
-class DesktopEncryptionSettingsFactory(private val profile: DesktopProfile) : EncryptionSettingsFactory {
+class DesktopEncryptionSettingsFactory(
+    private val profile: DesktopProfile,
+    /**
+     * The platform's secure credential store, or `null` where there is none. Injectable so the
+     * no-store path can be tested on a machine that has one.
+     */
+    private val credentialStorage: () -> SecretStore<StoredCredential>? = {
+        StorageProvider.getCredentialStorage(true, StorageProvider.SecureOption.REQUIRED)
+    },
+) : EncryptionSettingsFactory {
     override fun createEncrypted(name: String): Settings {
         val masterKey = loadOrCreateMasterKey()
         // Each named store gets its own child node. Previously `name` was ignored and every
@@ -60,7 +70,15 @@ class DesktopEncryptionSettingsFactory(private val profile: DesktopProfile) : En
 
     @OptIn(ExperimentalEncodingApi::class)
     private fun loadOrCreateMasterKey(): Key {
-        val credentialStorage = StorageProvider.getCredentialStorage(true, StorageProvider.SecureOption.REQUIRED)
+        // `null` means the system exposes no secure store — a Linux session with no keyring or no
+        // D-Bus, typically. There is nowhere safe to keep the key that protects the preferences, so
+        // this refuses rather than inventing somewhere; it used to dereference the null and hand the
+        // user a NullPointerException out of a password manager.
+        val credentialStorage = credentialStorage() ?: error(
+            "no secure credential store is available on this system, so the master key protecting " +
+                "your encrypted preferences cannot be stored. On Linux this usually means no " +
+                "keyring service (gnome-keyring / KWallet via libsecret) is running for this session.",
+        )
         val storedMasterKey = credentialStorage.get(profile.masterKeyName)?.password
         return if (storedMasterKey == null) {
             // Explicit 256-bit; the JCE default for "AES" is 128 (Android side already uses 256).
