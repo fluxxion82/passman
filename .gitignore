@@ -93,3 +93,7 @@ CLAUDE.md
 
 # Working notes — not part of the published source
 docs/
+
+# Agent worktrees live inside the repo root. Never repo content, and large: a `git add -A`
+# from a session that was not expecting one would commit somebody else's entire checkout.
+.claude/worktrees/
