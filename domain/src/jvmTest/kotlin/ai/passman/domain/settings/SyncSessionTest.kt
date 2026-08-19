@@ -14,7 +14,6 @@ import ai.passman.domain.settings.model.SyncSessionState
 import ai.passman.domain.settings.repository.TransferRepository
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
@@ -76,7 +75,13 @@ class SyncSessionTest {
         assertEquals(0, push.calls, "push must not run for an unpaired host")
         assertEquals(0, pull.calls, "pull must not run for an unpaired host")
         assertEquals(0, transfer.startCount, "server must not start for an unpaired host")
-        assertEquals(1, transfer.stopCount, "onCompletion must still tear the server down")
+        assertEquals(
+            0,
+            transfer.stopCount,
+            "onCompletion must not release a lease this session never took - the server is refcounted, " +
+                "and a stop here with no matching start would steal a lease from a sibling artifact " +
+                "session (pgp/keystore) still using the shared server",
+        )
         assertEquals(0L, testScheduler.currentTime, "a refusal must not consume any of the window")
     }
 
@@ -204,15 +209,24 @@ class SyncSessionTest {
     }
 
     /**
-     * Asymmetry worth pinning: PeerUnreachable is the *retryable* failure on the push side, but the
-     * pull side has no retry branch at all - any pull error, PeerUnreachable included, is terminal
-     * and surfaces verbatim rather than falling back into the 3s retry loop.
+     * Obligation 1 (rewrite) / obligation 4 (new): this used to pin the opposite - a PeerUnreachable
+     * pull failure was terminal on the first attempt, with `pull.calls == 1` and
+     * `currentTime == 0L`. That was backwards: a pull only runs after a *successful* push to the
+     * same host and port, which proves the peer's server was accepting milliseconds earlier, so a
+     * ConnectException on the pull means the peer's server went down in the teardown window between
+     * our push and our pull - not that it never came up. That is recoverable exactly the way a
+     * push-side PeerUnreachable is, so it now retries on the same 3s cadence out of the same shared
+     * deadline, and eventually reaches Success once the peer's server is back.
+     *
+     * Also pins obligation 9 (what the pull retries emit): no AwaitingPeer state reappears between
+     * Syncing and Success. Re-emitting AwaitingPeer - the "waiting to even start" state - after
+     * Syncing would visibly regress the UI backwards, so the pull retries are silent.
      */
     @Test
-    fun `peer-unreachable pull failure is terminal and is never retried`() = runTest {
+    fun `peer-unreachable pull failure retries and succeeds on a later attempt`() = runTest {
         val transfer = FakeTransferRepository()
-        val push = Script("push", Outcome.Success(Unit))
-        val pull = Script("pull", unreachable())
+        val push = Script("push", Outcome.Success(Unit), onCall = { transfer.handshake.value = true })
+        val pull = Script("pull", unreachable(), unreachable(), Outcome.Success(Unit))
 
         val states = session(transfer, push = push, pull = pull).toList()
 
@@ -221,13 +235,131 @@ class SyncSessionTest {
                 SyncSessionState.Idle,
                 SyncSessionState.AwaitingPeer(HOST, elapsedSeconds = 0),
                 SyncSessionState.Syncing(HOST),
-                SyncSessionState.Error(TransferFailure.PeerUnreachable(HOST), "peer is down"),
+                SyncSessionState.Success(HOST),
+            ),
+            states,
+            "no AwaitingPeer must reappear while the pull retries - Syncing stays the last visible state",
+        )
+        assertEquals(
+            1,
+            push.calls,
+            "a retried pull must not re-push - re-running the push would re-stage a temp file on the " +
+                "peer and raise a spurious reconcile conflict for data that already arrived once",
+        )
+        assertEquals(3, pull.calls, "two retries plus the successful attempt")
+        assertEquals(6_000L, testScheduler.currentTime, "two pull retry intervals of 3s each")
+        assertEquals(1, transfer.startCount)
+        assertEquals(1, transfer.stopCount)
+    }
+
+    /**
+     * Obligation 6: only [TransferFailure.PeerUnreachable] retries on the pull side. Everything
+     * else - a decrypt failure, an unpaired host, a refused handshake - is an answer, not an
+     * absence, and stays terminal on the very first attempt exactly like a non-retryable push
+     * error already does.
+     */
+    @Test
+    fun `non-peer-unreachable pull failure stays terminal on the first attempt`() = runTest {
+        val transfer = FakeTransferRepository()
+        val push = Script("push", Outcome.Success(Unit))
+        val pull = Script("pull", Outcome.Error("no hybrid key", TransferFailure.PublicKeyFetchFailure))
+
+        val states = session(transfer, push = push, pull = pull).toList()
+
+        assertEquals(
+            listOf(
+                SyncSessionState.Idle,
+                SyncSessionState.AwaitingPeer(HOST, elapsedSeconds = 0),
+                SyncSessionState.Syncing(HOST),
+                SyncSessionState.Error(TransferFailure.PublicKeyFetchFailure, "no hybrid key"),
             ),
             states,
         )
-        assertEquals(1, push.calls, "a terminal pull must not re-enter the push retry loop")
-        assertEquals(1, pull.calls, "the pull itself must not be retried either")
-        assertEquals(0L, testScheduler.currentTime, "no retry delay may be consumed on the pull side")
+        assertEquals(1, push.calls)
+        assertEquals(1, pull.calls, "a non-PeerUnreachable pull failure must not be retried")
+        assertEquals(0L, testScheduler.currentTime, "no retry delay may be consumed")
+        assertEquals(1, transfer.startCount)
+        assertEquals(1, transfer.stopCount)
+    }
+
+    /**
+     * Obligation 7: a PeerUnreachable pull retries, but the moment a later attempt comes back with
+     * a *different*, non-retryable failure, the loop must stop immediately rather than keep
+     * retrying (which would misreport the real failure as more unreachability) or paper over it as
+     * another PeerUnreachable tick.
+     */
+    @Test
+    fun `a peer-unreachable pull followed by a non-retryable error terminates mid-retry`() = runTest {
+        val transfer = FakeTransferRepository()
+        val push = Script("push", Outcome.Success(Unit))
+        val pull = Script(
+            "pull",
+            unreachable(),
+            unreachable(),
+            Outcome.Error("payload did not decrypt", TransferFailure.GeneralTransferFailure),
+        )
+
+        val states = session(transfer, push = push, pull = pull).toList()
+
+        assertEquals(
+            listOf(
+                SyncSessionState.Idle,
+                SyncSessionState.AwaitingPeer(HOST, elapsedSeconds = 0),
+                SyncSessionState.Syncing(HOST),
+                SyncSessionState.Error(TransferFailure.GeneralTransferFailure, "payload did not decrypt"),
+            ),
+            states,
+            "no AwaitingPeer reappears during the retries, and the final error is the real one, not PeerUnreachable",
+        )
+        assertEquals(1, push.calls, "still must not re-push")
+        assertEquals(3, pull.calls, "two retries, then the non-retryable failure that stops the loop")
+        assertEquals(6_000L, testScheduler.currentTime, "two pull retry intervals of 3s each before stopping")
+        assertEquals(1, transfer.startCount)
+        assertEquals(1, transfer.stopCount)
+    }
+
+    /**
+     * Obligation 8: pull retries spend the *same* 60s budget the push retries would have, not a
+     * fresh one of their own - a push that succeeds immediately leaves the full window for the
+     * pull to retry in, and it still times out at t=60s, not t=120s.
+     *
+     * This is also the case the "tell the truth on timeout" fix exists for: the push succeeded, so
+     * the peer's server demonstrably came up and our vault may already be sitting on it. Reporting
+     * that as `PeerSyncTimeout(reachedPeer = false)` / "did not enter sync mode" would be exactly
+     * the false permanent record the sync activity log must not persist - see obligation 14 in
+     * `SyncOutcomeRecordingTest` for the log-persistence side of this.
+     *
+     * Also pins obligation 9 alongside the earlier retry-then-succeed test: nothing but Idle,
+     * AwaitingPeer(0) and Syncing precedes the terminal state, however many pull attempts it took.
+     */
+    @Test
+    fun `pull retries share the session deadline and a reached-then-lost timeout tells the truth`() = runTest {
+        val transfer = FakeTransferRepository()
+        val push = Script("push", Outcome.Success(Unit))
+        val pull = Script("pull", unreachable(), repeatLast = true)
+
+        val states = session(transfer, push = push, pull = pull).toList()
+
+        assertEquals(
+            listOf(
+                SyncSessionState.Idle,
+                SyncSessionState.AwaitingPeer(HOST, elapsedSeconds = 0),
+                SyncSessionState.Syncing(HOST),
+                SyncSessionState.Error(
+                    TransferFailure.PeerSyncTimeout(HOST, reachedPeer = true),
+                    "Reached $HOST and pushed, but lost the connection before the pull confirmed it. " +
+                        "Your data may already be on the peer.",
+                ),
+            ),
+            states,
+        )
+        assertEquals(1, push.calls, "the push succeeded once and is never retried once pushSucceeded is true")
+        assertEquals(20, pull.calls, "one pull attempt per 3s tick across the full 60s window")
+        assertEquals(
+            60_000L,
+            testScheduler.currentTime,
+            "the pull retries spent the whole shared deadline, not a second 60s window of their own",
+        )
         assertEquals(1, transfer.startCount)
         assertEquals(1, transfer.stopCount)
     }
@@ -260,10 +392,13 @@ class SyncSessionTest {
     }
 
     /**
-     * A slow push attempt can leave the unconditional 3s retry delay straddling the deadline: the
-     * attempt fails at t=58s, the delay lands at t=61s, and the elapsed counter would read 61. The
-     * loop still emits that tick before re-testing its condition, so `coerceAtMost(SYNC_TIMEOUT_SECONDS)`
-     * is the only thing keeping the UI countdown from overshooting 60.
+     * Obligation 2 (rewrite): a slow push attempt can leave a naive, unconditional 3s retry delay
+     * straddling the deadline - the attempt fails at t=58s, an unclamped delay would land at t=61s,
+     * and the elapsed counter would read 61. `retryDelayMs` clamps the sleep itself to whatever
+     * remains of the deadline, so the loop can no longer overrun it at all: this scenario now ends
+     * *at* the deadline (t=60s) rather than 1s past it, and the old cosmetic
+     * `elapsed.coerceAtMost(SYNC_TIMEOUT_SECONDS)` at the emit site is gone because there is nothing
+     * left for it to clamp.
      */
     @Test
     fun `a retry delay crossing the deadline clamps the final tick and then times out`() = runTest {
@@ -273,7 +408,7 @@ class SyncSessionTest {
             unreachable(),
             unreachable(),
             unreachable(),
-            // Third attempt hangs until t=58s, so its retry delay expires at t=61s - past the deadline.
+            // Third attempt hangs until t=58s, so an unclamped retry delay would expire at t=61s.
             onCall = { call -> if (call == 2) delay(52_000) },
         )
         val pull = Script("pull", Outcome.Success(Unit))
@@ -286,9 +421,9 @@ class SyncSessionTest {
                 SyncSessionState.AwaitingPeer(HOST, elapsedSeconds = 0),
                 SyncSessionState.AwaitingPeer(HOST, elapsedSeconds = 3),
                 SyncSessionState.AwaitingPeer(HOST, elapsedSeconds = 6),
-                // Raw elapsed here is 61s; the clamp pins the countdown to the advertised 60s window.
+                // The clamped delay lands exactly at the deadline, not past it.
                 SyncSessionState.AwaitingPeer(HOST, elapsedSeconds = 60),
-                SyncSessionState.Error(TransferFailure.PeerSyncTimeout(HOST), "peer is down"),
+                SyncSessionState.Error(TransferFailure.PeerSyncTimeout(HOST, reachedPeer = false), "peer is down"),
             ),
             states,
         )
@@ -297,39 +432,99 @@ class SyncSessionTest {
         assertEquals(1, transfer.startCount)
         assertEquals(1, transfer.stopCount)
         assertEquals(
-            61_000L,
+            60_000L,
             testScheduler.currentTime,
-            "the final retry delay is unconditional, so the session overruns the deadline by 1s",
+            "the clamped retry delay can no longer carry the session past its own deadline",
         )
     }
 
+    /**
+     * Obligation 3 (rewrite): this used to pin the opposite - a thrown [IllegalStateException]
+     * propagated out of the flow to the collector. That was a real hazard: `runSyncSession` is
+     * collected in `viewModelScope.launch { }` with no catch downstream
+     * (`PasswordHomeViewModel.startSession`), so an uncaught exception there kills the process
+     * rather than showing an error. A failed bind is now caught, reported as
+     * [SyncSessionState.Error], and the flow ends normally instead.
+     *
+     * It must also not release a lease: [FakeTransferRepository.startTransferServer] mirrors
+     * production's `FileTransferRepository`, which rolls its own lease back internally before
+     * throwing, so this session was never holding one. Calling `stopTransferServer()` anyway - the
+     * old, unrefcounted-era assumption that "we tried to start, therefore we must stop" - would
+     * release a lease that belongs to whichever sibling artifact session (pgp/keystore) is still
+     * using the shared server.
+     */
     @Test
-    fun `a throwing startTransferServer propagates and still stops the server`() = runTest {
+    fun `a failing startTransferServer emits Error, releases no lease, and never propagates`() = runTest {
         val transfer = FakeTransferRepository(
             startFailure = IllegalStateException("transfer server refused to bind"),
         )
         val push = Script("push", Outcome.Success(Unit))
         val pull = Script("pull", Outcome.Success(Unit))
 
-        val states = mutableListOf<SyncSessionState>()
-        val thrown = assertFailsWith<IllegalStateException> {
-            session(transfer, push = push, pull = pull).toList(states)
-        }
+        val states = session(transfer, push = push, pull = pull).toList()
 
         assertEquals(
-            "transfer server refused to bind",
-            thrown.message,
-            "the failure must reach the collector intact",
-        )
-        assertEquals(
-            listOf<SyncSessionState>(SyncSessionState.Idle),
+            listOf(
+                SyncSessionState.Idle,
+                SyncSessionState.Error(
+                    TransferFailure.GeneralTransferFailure,
+                    "transfer server refused to bind",
+                ),
+            ),
             states,
-            "a failed server start must not emit AwaitingPeer",
+            "a failed server start must surface as a terminal Error, not AwaitingPeer or a thrown exception",
         )
         assertEquals(1, transfer.startCount)
-        assertEquals(1, transfer.stopCount, "onCompletion must tear down exactly once even when start threw")
+        assertEquals(
+            0,
+            transfer.stopCount,
+            "a failed start already rolled its own lease back internally - stopping again would " +
+                "release a lease this session never held, stealing one from a sibling session",
+        )
         assertEquals(0, push.calls, "no push may run without a receive server")
         assertEquals(0, pull.calls)
+    }
+
+    /**
+     * Review finding: `started` is declared outside `flow { }` so `onCompletion` can see it across
+     * that lambda boundary, but that makes it a variable of the returned Flow *instance* rather
+     * than of one collection - and a cold flow has to behave the same on its second collection as
+     * its first (`recordingOutcomes` documents the identical shape for its own `terminalRecorded`
+     * flag, in `SyncPasswords.kt`). This collects the very same [Flow] twice: the first collection
+     * starts the server and completes normally, and only the second turns unpaired - so if the
+     * `.onStart { started = false }` reset were ever removed, the stale `true` left over from the
+     * first collection would make `onCompletion` release a lease the second collection never took,
+     * stealing one from whichever sibling artifact session (pgp/keystore) is still using the
+     * shared server.
+     */
+    @Test
+    fun `a second collection that never starts the server does not release the first's lease`() = runTest {
+        val transfer = FakeTransferRepository()
+        val trusted = ToggleableTrustedDevices(PAIRED_DEVICE)
+        val push = Script("push", Outcome.Success(Unit), onCall = { transfer.handshake.value = true })
+        val pull = Script("pull", Outcome.Success(Unit))
+
+        val flow = session(transfer, trusted = trusted, push = push, pull = pull)
+
+        val first = flow.toList()
+        assertIs<SyncSessionState.Success>(first.last(), "the first collection must start and finish normally")
+        assertEquals(1, transfer.startCount)
+        assertEquals(1, transfer.stopCount, "the first collection's own lease must be released")
+
+        // Second collection of the exact same Flow instance - this time verification fails before
+        // the server is ever started.
+        trusted.paired = false
+        val second = flow.toList()
+
+        assertIs<SyncSessionState.Error>(second.last())
+        assertEquals(1, transfer.startCount, "a verify failure must never start the server")
+        assertEquals(
+            1,
+            transfer.stopCount,
+            "the second collection never started the server, so onCompletion must not release a " +
+                "lease it never took - a stale `started` flag left over from the first collection " +
+                "would otherwise leak exactly that release",
+        )
     }
 
     @Test
@@ -524,8 +719,14 @@ class SyncSessionTest {
     // endregion
 }
 
-/** Clock whose readings are the coroutine test scheduler's virtual time. */
-private class SchedulerClock(private val scheduler: TestCoroutineScheduler) : Clock {
+/**
+ * Clock whose readings are the coroutine test scheduler's virtual time.
+ *
+ * Internal rather than file-private because `SyncOutcomeRecordingTest` needs it too: any test that
+ * lets a session run to its deadline has to read time from the same virtual clock its `delay`s run
+ * on, or the loop spins in real time until the harness times the test out.
+ */
+internal class SchedulerClock(private val scheduler: TestCoroutineScheduler) : Clock {
     override fun now(): Instant = Instant.fromEpochMilliseconds(scheduler.currentTime)
 }
 
@@ -605,6 +806,25 @@ private class FakeTrustedDevices(private val device: TrustedDevice?) : TrustedDe
     override suspend fun updateLastSync(name: String, host: String, timestampMs: Long) {
         lastSyncStamp = Triple(name, host, timestampMs)
     }
+    override suspend fun updateHost(name: String, host: String) = Unit
+    override suspend fun updateAllowedOps(name: String, allowedOps: Set<String>) = Unit
+    override suspend fun markSignedHybridPairingsForReverification() = Unit
+}
+
+/**
+ * A [TrustedDevicesRepository] whose pairing can be flipped mid-test, for the `started`-reset
+ * regression test above: the first collection of a session's Flow needs the host paired, and the
+ * second needs it unpaired, on the exact same fake instance backing the exact same Flow.
+ */
+private class ToggleableTrustedDevices(private val device: TrustedDevice) : TrustedDevicesRepository {
+    var paired: Boolean = true
+
+    override fun observeAll(): Flow<List<TrustedDevice>> = emptyFlow()
+    override suspend fun getAll(): List<TrustedDevice> = if (paired) listOf(device) else emptyList()
+    override suspend fun add(device: TrustedDevice, expectedOwner: PairingOwner) = true
+    override suspend fun remove(name: String) = Unit
+    override suspend fun getByHost(host: String): TrustedDevice? = if (paired) device else null
+    override suspend fun updateLastSync(name: String, host: String, timestampMs: Long) = Unit
     override suspend fun updateHost(name: String, host: String) = Unit
     override suspend fun updateAllowedOps(name: String, allowedOps: Set<String>) = Unit
     override suspend fun markSignedHybridPairingsForReverification() = Unit

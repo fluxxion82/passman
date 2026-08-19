@@ -100,6 +100,7 @@ import ai.passman.domain.settings.ShareFile
 import ai.passman.domain.settings.StartPairingServer
 import ai.passman.domain.settings.StopPairingServer
 import ai.passman.domain.settings.StartTransferServer
+import ai.passman.domain.settings.StopTransferServer
 import ai.passman.domain.settings.SyncKeystores
 import ai.passman.domain.settings.SyncPasswords
 import ai.passman.domain.settings.SyncPgpKeys
@@ -225,6 +226,7 @@ val domainModule = module {
     single { GoToAppSettings(repository = get()) }
     single { TransferFile(passwordRepository = get()) }
     single { StartTransferServer(service = get()) }
+    single { StopTransferServer(service = get()) }
     single { StartPairingServer(service = get()) }
     single { StopPairingServer(service = get()) }
     single { GetIpAddress(transferRepository = get()) }

@@ -25,7 +25,9 @@ import ai.passman.domain.settings.repository.SyncLogRepository
 import ai.passman.domain.settings.repository.TransferRepository
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
@@ -286,6 +288,92 @@ class SyncOutcomeRecordingTest {
             "a real cancellation mid-session must be recorded, not silently dropped",
         )
         assertEquals(SyncOps.PASSWORDS, entry.artifact)
+    }
+
+    // endregion
+
+    // region: pull-retry plan (2026-08-19) obligation 14 — a pull-side terminal failure must record too
+    //
+    // Every failure recorded above is a push-side failure. `recordTerminalState` only looks at the
+    // terminal `SyncSessionState`, not at which phase produced it, so nothing here was ever
+    // actually at risk of missing a pull-side failure by construction - but that is exactly the
+    // kind of "obviously fine" gap the pull-retry work found once pulls became retryable, and it is
+    // cheap enough to pin directly rather than trust the inference.
+
+    @Test
+    fun `a non-retryable pull failure after a successful push is recorded as failed`() = runTest {
+        val log = RecordingTestSyncLog()
+        val transfer = RecordingTestTransferRepository()
+        val trusted = RecordingTestTrustedDevices(PAIRED_DEVICE)
+        val sync = SyncPasswords(
+            passwordRepository = FakePasswordRepository(
+                push = { Outcome.Success(Unit) },
+                pull = { Outcome.Error("payload did not decrypt", TransferFailure.GeneralTransferFailure) },
+            ),
+            transferRepository = transfer,
+            trustedDevices = trusted,
+            fingerprintService = UnusedFingerprintService,
+            passwordEventPersistence = InMemoryPasswordEventPersistence(UnconfinedFacade),
+            recordSyncOutcome = RecordSyncOutcome(log, trusted),
+        )
+
+        val states = sync(HOST).toList()
+
+        assertIs<SyncSessionState.Error>(states.last())
+        val entry = log.appended.single()
+        assertEquals(SyncLogEntry.OUTCOME_FAILED, entry.outcome)
+        assertEquals(
+            friendlyMessage(TransferFailure.GeneralTransferFailure, "payload did not decrypt"),
+            entry.detail,
+            "a pull-side failure must be logged exactly like a push-side one - same detail, same outcome",
+        )
+    }
+
+    /**
+     * The other half of "tell the truth on timeout" (`SyncPasswords.runSyncSession`): once the push
+     * has landed, a pull that keeps failing as [TransferFailure.PeerUnreachable] until the shared
+     * deadline must not persist "did not enter sync mode" - that sentence is false once the push
+     * succeeded, and this is the exact detail string [RecordSyncOutcome] would otherwise turn into
+     * a permanent, false record of a sync that partially worked.
+     */
+    @Test
+    fun `a reached-then-lost pull timeout records the truthful detail, not the never-reached message`() = runTest {
+        val log = RecordingTestSyncLog()
+        val transfer = RecordingTestTransferRepository()
+        val trusted = RecordingTestTrustedDevices(PAIRED_DEVICE)
+        val sync = SyncPasswords(
+            passwordRepository = FakePasswordRepository(
+                push = { Outcome.Success(Unit) },
+                pull = { Outcome.Error("peer unreachable: connection refused", TransferFailure.PeerUnreachable(HOST)) },
+            ),
+            transferRepository = transfer,
+            trustedDevices = trusted,
+            fingerprintService = UnusedFingerprintService,
+            passwordEventPersistence = InMemoryPasswordEventPersistence(UnconfinedFacade),
+            recordSyncOutcome = RecordSyncOutcome(log, trusted),
+            // The session's retry delays are virtual under runTest, so its deadline has to be read
+            // from the same virtual clock. On the system clock the loop spins in real time until
+            // the harness kills the test a minute later.
+            clock = SchedulerClock(testScheduler),
+        )
+
+        val states = sync(HOST).toList()
+
+        val terminal = assertIs<SyncSessionState.Error>(states.last())
+        val failure = assertIs<TransferFailure.PeerSyncTimeout>(terminal.failure)
+        assertTrue(failure.reachedPeer, "the push landed before the pull retries ran out the clock")
+
+        val entry = log.appended.single()
+        assertEquals(SyncLogEntry.OUTCOME_FAILED, entry.outcome)
+        assertFalse(
+            entry.detail.contains("did not enter sync mode"),
+            "the push succeeded - our vault may already be on the peer - so the persisted detail must " +
+                "not claim the peer was never reached",
+        )
+        assertTrue(
+            entry.detail.contains("already be on the peer"),
+            "the persisted detail must say the data may already have landed on the peer",
+        )
     }
 
     // endregion

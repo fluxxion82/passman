@@ -16,6 +16,7 @@ import ai.passman.viewvo.navigation.PassDetails
 import ai.passman.viewvo.navigation.PasswordHomeNavigation
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -136,9 +137,17 @@ class PasswordHomeViewModel(
     }
 
     fun onSyncTargetChosen(device: TrustedDevice) {
-        syncJob?.cancel()
         syncTargetPicker.dismiss()
-        startSession(device.lastHost)
+        viewModelScope.launch {
+            // Wait for the previous session's job to actually finish, not just be marked
+            // cancelled, before starting the new one. The transfer server lease is refcounted
+            // now, so this can't leave a sibling session serverless either way — but a restart
+            // that outran its predecessor's own stopTransferServer() lease release was one of the
+            // original causes of the intermittent sync failures this fixes, and a join here costs
+            // nothing.
+            syncJob?.cancelAndJoin()
+            startSession(device.lastHost)
+        }
     }
 
     fun onSyncTargetHostEdited(device: TrustedDevice, host: String) {

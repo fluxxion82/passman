@@ -25,8 +25,31 @@ fun friendlyMessage(failure: Failure, fallback: String): String = when (failure)
         "Aborted: ${failure.host} presented a different fingerprint than paired " +
             "device '${failure.deviceName}'. Verify the peer or re-pair from Settings."
     is TransferFailure.PeerSyncTimeout ->
-        "Peer at ${failure.host} did not enter sync mode. Tap Sync on the peer device to sync."
+        if (failure.reachedPeer) {
+            // The push landed before the pull retries ran out the clock - "did not enter sync
+            // mode" would be false here, so this falls back to whatever accurate message
+            // runSyncSession built instead of hardcoding one that ignores reachedPeer entirely.
+            // In production runSyncSession always supplies that message, so this branch is a
+            // defensive backstop, not a live path - but it still has to say the same thing
+            // runSyncSession does, hence the shared peerReachedTimeoutMessage below rather than a
+            // second copy of the sentence that could quietly drift from the first.
+            fallback.ifBlank { peerReachedTimeoutMessage(failure.host) }
+        } else {
+            "Peer at ${failure.host} did not enter sync mode. Tap Sync on the peer device to sync."
+        }
     is TransferFailure.SyncCancelled ->
         "Sync cancelled."
     else -> fallback.ifBlank { "Sync failed." }
 }
+
+/**
+ * The message for a [TransferFailure.PeerSyncTimeout] whose push reached the peer before the pull
+ * retries ran out the shared deadline - the peer's server demonstrably came up, so our vault may
+ * already be sitting on it. [runSyncSession] builds this exact text for the
+ * [ai.passman.domain.settings.model.SyncSessionState.Error] it emits, and [friendlyMessage] above
+ * falls back to the identical string for the same case. Kept here as the one place both read from,
+ * rather than as two independently-written copies of the same sentence.
+ */
+fun peerReachedTimeoutMessage(host: String): String =
+    "Reached $host and pushed, but lost the connection before the pull " +
+        "confirmed it. Your data may already be on the peer."

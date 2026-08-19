@@ -40,6 +40,7 @@ import io.ktor.server.engine.*
 import io.ktor.server.netty.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -54,7 +55,6 @@ import org.koin.core.qualifier.named
 import org.koin.mp.KoinPlatform
 import java.io.File
 import java.security.Key
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Shared receive-side server + reconcile logic for desktop and android.
@@ -98,10 +98,23 @@ class FileTransferRepository(
     private var embeddedServer: EmbeddedServer<NettyApplicationEngine, NettyApplicationEngine.Configuration>? = null
     private var pairingServer: EmbeddedServer<NettyApplicationEngine, NettyApplicationEngine.Configuration>? = null
 
-    // Start guard: the transfer server is created inside a launched coroutine, so a plain
-    // null-check on the server field races — two rapid start calls could both pass it and bind
-    // the port twice.
-    private val transferServerActive = AtomicBoolean(false)
+    // The data server is shared: three independent artifact sync sessions (passwords, PGP,
+    // keystore) can each be mid-window at once, and each takes out a lease via
+    // startTransferServer(). It is refcounted rather than boolean so the caller that finishes
+    // first cannot tear the server out from under a sibling session still using it —
+    // stopTransferServer only actually stops the server once the last lease is released. A plain
+    // var, not an AtomicBoolean/AtomicInteger: everything that touches it now runs inline under
+    // transferServerLock instead of racing a launched coroutine, so there is nothing left for
+    // atomicity to buy, and a second, separately-synchronized flag would just be one more place
+    // for "running" to say something the lease count disagrees with.
+    private var transferServerLeases = 0
+
+    // Start and stop serialise under this lock, mirroring pairingServerLock below: a start
+    // arriving mid-stop must wait for the teardown to actually finish (or discover it never
+    // touched the server, because another lease is still held) rather than observe a
+    // half-torn-down server, and two concurrent starts must not both decide they are "the first"
+    // and bind the port twice.
+    private val transferServerLock = Mutex()
 
     // The pairing listener instead starts and stops inline under this lock. Its callers sequence
     // stop-then-start restarts around every ceremony and rely on teardown really tearing down,
@@ -152,49 +165,87 @@ class FileTransferRepository(
 
     override suspend fun getIpAddress(): String = ipAddressProvider.getLocalIpAddress()
 
+    /**
+     * Starts the shared TLS data server that all three artifact sync sessions (passwords, PGP,
+     * keystore) sync through, or joins an already-running one.
+     *
+     * Refcounted, like [startPairingServer]/[stopPairingServer]: this call takes out one lease on
+     * the server and [stopTransferServer] releases one, and the server itself only actually stops
+     * once the last lease is released. Three independent Home ViewModels can each have a sync
+     * session mid-window at once; without this, whichever session finished first tore the server
+     * out from under a sibling session still using it — up to a 60s window, and the best candidate
+     * for a real report of intermittent sync failures that succeeded on retry.
+     *
+     * Runs the actual bind inline, under [transferServerLock], exactly as [startPairingServer]
+     * does — so by the time this suspend function returns, the socket is either accepting
+     * connections or this call has thrown. (In the pinned Ktor 3.5.2,
+     * `NettyApplicationEngine.start(wait = false)` binds synchronously and throws on a failed
+     * bind, which is the entire mechanism this relies on; there is deliberately no wait on
+     * `resolvedConnectors()` here, since that handle only completes on a *successful* bind and
+     * would hang forever on exactly the `BindException` this needs to surface.) A concurrent
+     * caller blocked on the same lock therefore never observes a half-bound server: it either
+     * finds one already accepting, or it acquires the lock after a failed attempt has rolled
+     * itself back and makes its own attempt.
+     *
+     * A bind failure is rethrown, not swallowed. Turning that into a user-visible session error is
+     * the caller's job — this only guarantees the failure is no longer invisible.
+     */
     override suspend fun startTransferServer() {
-        if (!transferServerActive.compareAndSet(false, true)) {
-            KLogger.d { "startTransferServer: already running, no-op" }
-            return
-        }
-        // Reset handshake state for a fresh session.
-        inboundPushes = 0
-        inboundSyncPulls = 0
-        _peerHandshakeComplete.value = false
+        withContext(coroutinesContextFacade.default) {
+            transferServerLock.withLock {
+                transferServerLeases++
+                if (embeddedServer != null) {
+                    KLogger.d { "startTransferServer: already running, lease=$transferServerLeases" }
+                    return@withLock
+                }
+                // Reset handshake state for a fresh session.
+                inboundPushes = 0
+                inboundSyncPulls = 0
+                _peerHandshakeComplete.value = false
 
-        coroutineScopeFacade.transferScope.cancel()
-        coroutineScopeFacade.transferScope =
-            CoroutineScope(coroutinesContextFacade.default + SupervisorJob())
-        // Mutual-TLS material for the data port: presents this device's cert and only admits
-        // clients whose SPKI pins to a paired device (ClientAuth.REQUIRE). Built before launching so
-        // the server never comes up plaintext once the user is signed in with paired devices.
-        val serverTls = syncTlsProvider.serverTls()
-        coroutineScopeFacade.transferScope.launch {
-            runCatching {
-                KLogger.i { "start server (mTLS=${serverTls != null})" }
-                embeddedServer = startServer(
-                    port = DATA_PORT,
-                    tempFilePath = tmpDir,
-                    getFileFromName = ::processFileRequest,
-                    onFileUploaded = ::processUploadedFile,
-                    artifactUploadHandlers = mapOf(
-                        "pgp-keys" to ::processPgpKeysUploaded,
-                        "keystore" to ::processKeystoreUploaded,
-                    ),
-                    syncPullHandlers = mapOf(
-                        "passwords" to ::providePasswordSyncPull,
-                        "pgp-keys" to ::providePgpSyncPull,
-                        "keystore" to ::provideKeystoreSyncPull,
-                    ),
-                    serverTls = serverTls,
-                    // Narrow each paired device to only its permitted ops (esp. gate pgp-import).
-                    authorizer = syncTlsProvider::authorize,
-                )
-                embeddedServer?.start()
-            }.onFailure {
-                KLogger.e(it) { "transfer server failed to start" }
-                embeddedServer = null
-                transferServerActive.set(false)
+                coroutineScopeFacade.transferScope.cancel()
+                coroutineScopeFacade.transferScope =
+                    CoroutineScope(coroutinesContextFacade.default + SupervisorJob())
+                runCatching {
+                    // Mutual-TLS material for the data port: presents this device's cert and only
+                    // admits clients whose SPKI pins to a paired device (ClientAuth.REQUIRE). Built
+                    // before starting so the server never comes up plaintext once the user is signed
+                    // in with paired devices.
+                    //
+                    // Inside the runCatching, not before it: this resolves the session scope through
+                    // Koin and can throw, and a throw out here would leave the lease taken out above
+                    // held with no server to match it — the exact invariant the rollback below
+                    // exists to keep.
+                    val serverTls = syncTlsProvider.serverTls()
+                    KLogger.i { "start server (mTLS=${serverTls != null})" }
+                    embeddedServer = startServer(
+                        port = DATA_PORT,
+                        tempFilePath = tmpDir,
+                        getFileFromName = ::processFileRequest,
+                        onFileUploaded = ::processUploadedFile,
+                        artifactUploadHandlers = mapOf(
+                            "pgp-keys" to ::processPgpKeysUploaded,
+                            "keystore" to ::processKeystoreUploaded,
+                        ),
+                        syncPullHandlers = mapOf(
+                            "passwords" to ::providePasswordSyncPull,
+                            "pgp-keys" to ::providePgpSyncPull,
+                            "keystore" to ::provideKeystoreSyncPull,
+                        ),
+                        serverTls = serverTls,
+                        // Narrow each paired device to only its permitted ops (esp. gate pgp-import).
+                        authorizer = syncTlsProvider::authorize,
+                    )
+                    embeddedServer?.start()
+                }.onFailure {
+                    // Roll back so a later start is not permanently wedged behind this attempt's
+                    // failure: the lease taken out above must not outlive the server it failed to
+                    // produce, or the next call's "already running" check above would lie.
+                    embeddedServer = null
+                    transferServerLeases--
+                    if (it is CancellationException) throw it
+                    KLogger.e(it) { "transfer server failed to start" }
+                }.getOrThrow()
             }
         }
     }
@@ -281,14 +332,58 @@ class FileTransferRepository(
         Json.decodeFromString<DeviceIdentityBundle>(bytes.decodeToString())
     }.isSuccess
 
+    /**
+     * Releases one lease taken out by [startTransferServer]. The server itself only stops once the
+     * last lease is released — see [startTransferServer]'s doc for why it is refcounted at all.
+     *
+     * Runs off Main, under [transferServerLock], and (like [startTransferServer]) serialises with
+     * every other start/stop: a start arriving mid-teardown here waits for this call to finish —
+     * either because the socket really came down and the start rebinds, or because another lease
+     * was still held and this call never touched the server at all.
+     */
     override suspend fun stopTransferServer() {
-        KLogger.d { "stopTransferServer" }
-        // Grace period so an in-flight sync-pull response finishes flushing before the socket
-        // closes. Without it, the moment this side's handshake completed it tore the server down
-        // mid-response and the peer's pull failed with EOFException ("server prematurely closed").
-        embeddedServer?.stop(gracePeriodMillis = 1_500, timeoutMillis = 4_000)
-        embeddedServer = null
-        transferServerActive.set(false)
+        // NonCancellable is load-bearing, not defensive. The only production caller is
+        // runSyncSession's `onCompletion`, which runs in the collector *after* it has been
+        // cancelled — every user cancel, every cancelAndJoin restart, every VM clear mid-sync.
+        // A plain withContext calls ensureActive() first and throws without running its block
+        // there, so teardown would silently never happen: the lease would never be released, the
+        // mTLS server would hold port 2323 for the rest of the process, and a stale
+        // _peerHandshakeComplete would make later sessions' Phase B release instantly. The old
+        // blocking stop() had no suspension point and so was immune; making this suspend is what
+        // introduced the hazard. `recordingOutcomes` in SyncPasswords.kt guards its own
+        // onCompletion writes the same way, for the same reason.
+        withContext(NonCancellable + coroutinesContextFacade.default) {
+            transferServerLock.withLock {
+                if (transferServerLeases > 0) {
+                    transferServerLeases--
+                } else {
+                    // A stop with no lease outstanding means some caller's start/stop pairing is
+                    // broken. Absorbed rather than thrown — a teardown path is the wrong place to
+                    // start failing — but never silently, because the next symptom is a sibling
+                    // session losing its server to a stop it did not own.
+                    KLogger.w { "stopTransferServer: no lease outstanding - unpaired stop" }
+                }
+                KLogger.d { "stopTransferServer: lease=$transferServerLeases" }
+                if (transferServerLeases > 0) {
+                    // Another session's window still depends on this server. Stopping here is
+                    // exactly the reported bug: an unrefcounted stop let one artifact's session
+                    // finishing first kill the socket out from under a sibling session's still-open
+                    // window.
+                    return@withLock
+                }
+                // Grace period so an in-flight sync-pull response finishes flushing before the
+                // socket closes. Without it, the moment the last lease's handshake completed it
+                // tore the server down mid-response and the peer's pull failed with
+                // EOFException ("server prematurely closed").
+                //
+                // stopSuspend, not the blocking stop(): this is called from `onCompletion` on Main,
+                // and the blocking call held Main for the whole 1.5-4s grace/timeout window on
+                // every session end. stopSuspend (added in this Ktor version) does the identical
+                // wait off-thread instead.
+                embeddedServer?.stopSuspend(gracePeriodMillis = 1_500, timeoutMillis = 4_000)
+                embeddedServer = null
+            }
+        }
     }
 
     override suspend fun isTransferServerRunning(): Boolean = embeddedServer != null
@@ -480,7 +575,12 @@ class FileTransferRepository(
     }
 
     internal companion object {
-        private const val DATA_PORT = 2323
+        /**
+         * The TLS data server's port. Internal rather than private so the readiness tests that dial
+         * this port read the port it actually opens — a copy of the literal in a test is a copy
+         * that goes on passing after this one moves.
+         */
+        internal const val DATA_PORT = 2323
 
         /**
          * The plaintext pairing listener's port. Internal rather than private so the tests that

@@ -27,6 +27,7 @@ import ai.passman.domain.user.repository.UserPreferences
 import com.k2k.test.tls.K2kClientTls
 import java.io.File
 import java.net.ConnectException
+import java.net.NoRouteToHostException
 import java.net.SocketTimeoutException
 import java.nio.file.Files
 import java.security.Key
@@ -289,6 +290,19 @@ class ArtifactSyncClientTest {
         val timedOut = assertIs<Outcome.Error>(client(devices).pull(SyncArtifact.Passwords, HOST, PORT))
         assertEquals("peer unreachable: read timed out", timedOut.message)
         assertEquals(TransferFailure.PeerUnreachable(HOST), timedOut.cause)
+
+        // ConnectException's sibling under SocketException, and the classic dozing-Wi-Fi-peer
+        // error - without this mapping a phone that let its radio sleep failed the *first* sync
+        // attempt with no retry at all.
+        network.failWith = { NoRouteToHostException("no route to host") }
+        val noRoute = assertIs<Outcome.Error>(client(devices).push(SyncArtifact.Passwords, PAYLOAD, FILE_NAME, HOST, PORT))
+        assertEquals("peer unreachable: no route to host", noRoute.message)
+        assertEquals(TransferFailure.PeerUnreachable(HOST), noRoute.cause)
+
+        network.failWith = { NoRouteToHostException("no route to host") }
+        val noRoutePull = assertIs<Outcome.Error>(client(devices).pull(SyncArtifact.Passwords, HOST, PORT))
+        assertEquals("peer unreachable: no route to host", noRoutePull.message)
+        assertEquals(TransferFailure.PeerUnreachable(HOST), noRoutePull.cause)
 
         network.failWith = { IllegalStateException("boom") }
         val general = assertIs<Outcome.Error>(client(devices).push(SyncArtifact.Passwords, PAYLOAD, FILE_NAME, HOST, PORT))

@@ -10,6 +10,7 @@ import ai.passman.domain.connectivity.model.PairingSecurity
 import ai.passman.domain.settings.exception.TransferFailure
 import com.k2k.test.tls.K2kClientTls
 import java.net.ConnectException
+import java.net.NoRouteToHostException
 import java.net.SocketTimeoutException
 import kotlinx.coroutines.CancellationException
 
@@ -204,7 +205,16 @@ class ArtifactSyncClient(
     }.getOrElse {
         if (it is CancellationException) throw it
         when (it) {
-            is ConnectException, is SocketTimeoutException ->
+            // NoRouteToHostException is ConnectException's sibling under SocketException - the
+            // classic dozing-Wi-Fi-peer error, and without it here a phone that let its radio sleep
+            // failed the *first* push attempt with no retry, since this mapping is what decides
+            // whether runSyncSession's retry loop ever sees PeerUnreachable at all.
+            //
+            // SocketException("Connection reset") and EOFException are deliberately left out and
+            // therefore terminal: they can mean a transfer was cut *part-way through*, which is not
+            // the same claim as "nobody answered" - retrying that blind could re-drive a push into a
+            // peer that is mid-processing the last one. Revisit with evidence, not by guessing.
+            is ConnectException, is SocketTimeoutException, is NoRouteToHostException ->
                 Outcome.Error("peer unreachable: ${it.message}", TransferFailure.PeerUnreachable(hostName))
             else ->
                 Outcome.Error("${artifact.pushFailurePrefix}: ${it.message}", TransferFailure.GeneralTransferFailure)
@@ -265,7 +275,11 @@ class ArtifactSyncClient(
     }.getOrElse {
         if (it is CancellationException) throw it
         when (it) {
-            is ConnectException, is SocketTimeoutException ->
+            // Mirrors push's mapping above - see its comment for why NoRouteToHostException joins
+            // the retryable pair and why a reset/EOF stays terminal. This is also the mapping that
+            // now feeds runSyncSession's pull-retry loop: a PeerUnreachable here is what makes a
+            // retried pull retry, and anything else here is what keeps a retried pull terminal.
+            is ConnectException, is SocketTimeoutException, is NoRouteToHostException ->
                 Outcome.Error("peer unreachable: ${it.message}", TransferFailure.PeerUnreachable(hostName))
             else ->
                 Outcome.Error("${artifact.pullFailurePrefix}: ${it.message}", TransferFailure.GeneralTransferFailure)

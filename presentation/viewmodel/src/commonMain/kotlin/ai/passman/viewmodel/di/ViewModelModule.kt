@@ -225,6 +225,7 @@ val viewModelModule = module {
             transferFile = get(),
             getIpAddress = get(),
             startTransferServer = get(),
+            stopTransferServer = get(),
             getSyncTargets = get(),
             transferEventPersistence = get(),
         )
