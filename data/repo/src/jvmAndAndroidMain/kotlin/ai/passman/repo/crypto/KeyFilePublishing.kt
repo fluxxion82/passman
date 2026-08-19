@@ -1,6 +1,8 @@
 package ai.passman.repo.crypto
 
 import ai.passman.crypto.io.DurableFiles
+import ai.passman.logging.KLogger
+import ai.passman.platform.transfer.DirectoryBundler
 import ai.passman.repo.io.SecureFiles
 import java.io.File
 import java.nio.ByteBuffer
@@ -33,13 +35,55 @@ internal object KeyFilePublishing {
      * needs a check-then-write two racers could both pass. The managers' zero-length quarantine path
      * disposes of the husk on the next load instead.
      *
-     * Written directly under `CREATE_NEW` rather than temp-file + rename, because a rename replaces
-     * unconditionally — it cannot lose to a racer, which is the entire point here. The trade is that
-     * a crash mid-write leaves a partial file instead of nothing; for a *first* generation that is
-     * recoverable by construction (the identity was never completed, so no peer can hold it), and
-     * the quarantine path turns the partial file into a fresh generation on the next load.
+     * The content is staged under a [DirectoryBundler.TEMP_FILE_SUFFIX] name and *linked* into
+     * place rather than written straight through `CREATE_NEW`. `link(2)` is atomic and fails when
+     * the target exists, so it keeps the exactly-one-winner property `CREATE_NEW` gave — a rename
+     * would not, because it replaces unconditionally and so cannot lose to a racer.
+     *
+     * Writing through `CREATE_NEW` claimed the name and *then* wrote, leaving the target at zero
+     * length for the duration of the write. That is indistinguishable from a crashed claimer's husk,
+     * so a second process starting up inside that window quarantined a live publisher's file,
+     * generated a second identity, and published that instead. The first process finished writing
+     * into an unlinked descriptor and handed its caller a keypair that was not on disk, orphaning
+     * every peer it then paired with — the one outcome the key managers document as never allowed to
+     * happen. Linking a fully-written file makes the target visible only in its final state, so the
+     * window does not exist.
+     *
+     * A crash now leaves a `.tmp` husk rather than a truncated key file, and the bundler already
+     * filters that suffix in both directions, so it never goes on the wire.
+     *
+     * Volumes without hard links (some removable and network filesystems) fall back to the original
+     * `CREATE_NEW` write. That path still has the window described above, but is no worse than the
+     * behaviour it replaces.
      */
     fun publishNew(file: File, bytes: ByteArray): Boolean {
+        val staged = File.createTempFile("${file.name}.", DirectoryBundler.TEMP_FILE_SUFFIX, file.parentFile)
+        try {
+            SecureFiles.ownerOnly(staged) // owner-only before any key-bearing byte is written
+            FileChannel.open(staged.toPath(), StandardOpenOption.WRITE).use { channel ->
+                val buffer = ByteBuffer.wrap(bytes)
+                while (buffer.hasRemaining()) channel.write(buffer) // write() is allowed to be short
+                channel.force(true) // content on stable storage before the name is claimed
+            }
+            return try {
+                Files.createLink(file.toPath(), staged.toPath())
+                SecureFiles.ownerOnly(file)
+                true
+            } catch (_: FileAlreadyExistsException) {
+                false
+            } catch (e: Exception) {
+                // UnsupportedOperationException, or an IOException from a volume without links.
+                KLogger.e(e) { "hard-link publish unavailable for ${file.name}; falling back to CREATE_NEW" }
+                publishByCreateNew(file, bytes)
+            }
+        } finally {
+            staged.delete()
+            DurableFiles.syncDirectory(file.parentFile)
+        }
+    }
+
+    /** The pre-link publish: claims the name, then writes. Only for volumes without hard links. */
+    private fun publishByCreateNew(file: File, bytes: ByteArray): Boolean {
         val channel = try {
             FileChannel.open(file.toPath(), StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
         } catch (_: FileAlreadyExistsException) {
@@ -56,7 +100,6 @@ internal object KeyFilePublishing {
             channel.close()
             // A failed publication must not leave the husk this method itself refuses to reclaim.
             if (!complete) file.delete()
-            DurableFiles.syncDirectory(file.parentFile)
         }
         return true
     }

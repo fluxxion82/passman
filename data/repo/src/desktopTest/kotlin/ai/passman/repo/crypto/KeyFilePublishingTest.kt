@@ -95,4 +95,47 @@ class KeyFilePublishingTest {
         assertFalse(KeyFilePublishing.publishNew(target, byteArrayOf(5)))
         assertEquals(0L, target.length())
     }
+
+    /**
+     * The target must never be visible in a half-published state.
+     *
+     * `CREATE_NEW` claims the name and *then* writes, so the target existed at zero length for the
+     * whole write. The key managers read a zero-length key file as a crashed claimer's husk and
+     * quarantine it — so a second process starting up during that window moved a live publisher's
+     * file aside, generated a second identity, and published that instead. The first process
+     * finished writing into an unlinked descriptor and handed its caller a keypair that was not on
+     * disk, orphaning every peer it then paired with. That is the one thing `HybridKeyManager`
+     * documents as never allowed to happen.
+     *
+     * A watcher thread samples the target for the duration of a publish. Every sample that sees the
+     * file must see it complete.
+     */
+    @Test
+    fun `publishNew never exposes the target in a half-written state`() {
+        val target = File(dir, "hybrid.key")
+        // Large enough that the write plus fsync is wide enough for a spinning watcher to sample.
+        val payload = ByteArray(4 * 1024 * 1024) { (it and 0xFF).toByte() }
+        val sightings = java.util.concurrent.ConcurrentLinkedQueue<Long>()
+        val publishing = java.util.concurrent.atomic.AtomicBoolean(true)
+        val watcher = Thread {
+            while (publishing.get()) {
+                if (target.exists()) sightings.add(target.length())
+            }
+        }
+
+        watcher.start()
+        try {
+            assertTrue(KeyFilePublishing.publishNew(target, payload))
+        } finally {
+            publishing.set(false)
+            watcher.join()
+        }
+
+        assertEquals(
+            emptyList(),
+            sightings.filter { it != payload.size.toLong() }.distinct(),
+            "the target was visible at these lengths mid-publish; a concurrent reader would " +
+                "quarantine it as a husk and replace this device's identity",
+        )
+    }
 }
