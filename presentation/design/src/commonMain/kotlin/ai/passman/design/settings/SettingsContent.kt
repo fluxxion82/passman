@@ -1,0 +1,554 @@
+package ai.passman.design.settings
+
+import ai.passman.domain.settings.model.ThemeMode
+import ai.passman.domain.settings.model.PortableVaultAccess
+import ai.passman.domain.settings.model.PortableVaultRecoveryFormat
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import ai.passman.design.core.PasswordVisibilityToggle
+import ai.passman.design.core.button.PassmanPrimaryButton
+import ai.passman.design.core.formKeyboardNavigation
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.TextField
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+
+@Composable
+fun SettingsContent(
+    changePassIcon: Painter,
+    transferIcon: Painter,
+    manageDevicesIcon: Painter,
+    privacyIcon: Painter,
+    clipboardIcon: Painter,
+    themeIcon: Painter,
+    oldPassword: String,
+    newPassword: String,
+    changePasswordDialogVisible: Boolean,
+    isChangingPassword: Boolean,
+    changePasswordError: String?,
+    clipboardExpiryEnabled: Boolean,
+    clipboardExpirySeconds: Long,
+    themeMode: ThemeMode,
+    onOldPassUpdated: (String) -> Unit,
+    onNewPassUpdated: (String) -> Unit,
+    onChangePasswordDialogOpened: () -> Unit,
+    onChangePasswordDialogDismissed: () -> Unit,
+    onChangePasswordClicked: () -> Unit,
+    onTransferClick: () -> Unit,
+    onManageDevicesClick: () -> Unit,
+    onPrivacyPolicyClick: () -> Unit,
+    onClipboardExpiryToggled: (Boolean) -> Unit,
+    onThemeModeSelected: (ThemeMode) -> Unit,
+    portableVaultAccess: PortableVaultAccess?,
+    portableVaultDialogVisible: Boolean,
+    onPortableVaultAccessClick: () -> Unit,
+    onPortableVaultDialogDismissed: () -> Unit,
+    onPortableVaultRecoveryCopyClicked: () -> Unit,
+    onPortableVaultRecoveryUpgradeClicked: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
+        SettingsTextWithDialog(
+            name = "Change User Password",
+            oldPassword = oldPassword,
+            newPassword = newPassword,
+            isDialogShown = changePasswordDialogVisible,
+            isChangingPassword = isChangingPassword,
+            errorMessage = changePasswordError,
+            onOldPassUpdated = onOldPassUpdated,
+            onNewPassUpdated = onNewPassUpdated,
+            onOpen = onChangePasswordDialogOpened,
+            onDismiss = onChangePasswordDialogDismissed,
+            onSave = {
+                onChangePasswordClicked()
+            },
+            icon = changePassIcon,
+        )
+
+        SettingsText(
+            icon = transferIcon,
+            name = "Transfer Passwords",
+            onClick = onTransferClick,
+        )
+
+        SettingsText(
+            icon = changePassIcon,
+            name = "Portable Vault Recovery",
+            onClick = onPortableVaultAccessClick,
+        )
+
+        SettingsText(
+            icon = manageDevicesIcon,
+            name = "Manage Paired Devices",
+            onClick = onManageDevicesClick,
+        )
+
+        SettingsText(
+            icon = privacyIcon,
+            name = "Privacy Policy",
+            onClick = onPrivacyPolicyClick,
+        )
+
+        SettingsSwitch(
+            icon = clipboardIcon,
+            name = "Clear Copied Passwords",
+            summary = "Takes a copied password back off the clipboard after $clipboardExpirySeconds seconds. " +
+                "Anything you copy afterwards is left alone.",
+            checked = clipboardExpiryEnabled,
+            onCheckedChange = onClipboardExpiryToggled,
+        )
+
+        SettingsSegmented(
+            icon = themeIcon,
+            name = "Theme",
+            summary = "Choose whether Passman follows your device or stays light or dark.",
+            selectedMode = themeMode,
+            onModeSelected = onThemeModeSelected,
+            // Last row: no trailing divider. Move this flag if a row is ever appended below.
+            showDivider = false,
+        )
+
+        if (portableVaultDialogVisible && portableVaultAccess != null) {
+            PortableVaultAccessDialog(
+                access = portableVaultAccess,
+                onDismiss = onPortableVaultDialogDismissed,
+                onCopy = onPortableVaultRecoveryCopyClicked,
+                onUpgrade = onPortableVaultRecoveryUpgradeClicked,
+            )
+        }
+    }
+}
+
+@Composable
+private fun PortableVaultAccessDialog(
+    access: PortableVaultAccess,
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+    onUpgrade: () -> Unit,
+) {
+    val legacy = access.recoveryFormat == PortableVaultRecoveryFormat.LegacyBase64Url
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(shape = MaterialTheme.shapes.large) {
+            Column(modifier = Modifier.padding(24.dp)) {
+                Text("Portable Vault Recovery", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    if (legacy) {
+                        "Save this legacy recovery password outside Passman. It opens the recovery P12 for command-line access."
+                    } else {
+                        "Save this 24-word recovery phrase outside Passman. It is the password for the recovery P12 and opens it with standard command-line tools."
+                    },
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(access.recoveryPassword, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(12.dp))
+                PassmanPrimaryButton(
+                    text = if (legacy) "Copy recovery password" else "Copy recovery phrase",
+                    onClick = onCopy,
+                )
+                if (legacy) {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "Upgrade to a 24-word phrase to make the recovery secret easier to record. " +
+                            "The old recovery password will stop opening this P12.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    PassmanPrimaryButton(text = "Upgrade to 24-word phrase", onClick = onUpgrade)
+                }
+                Spacer(Modifier.height(12.dp))
+                Text("P12: ${access.pkcs12Path}", style = MaterialTheme.typography.bodySmall)
+                Text("Certificate: ${access.certificatePath}", style = MaterialTheme.typography.bodySmall)
+                Text("Vault: ${access.vaultPath}", style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(16.dp))
+                PassmanPrimaryButton(text = "Done", onClick = onDismiss, modifier = Modifier.align(Alignment.End))
+            }
+        }
+    }
+}
+
+@Composable
+fun SettingsSwitch(
+    icon: Painter,
+    name: String,
+    summary: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    showDivider: Boolean = true,
+) {
+    Surface(
+        color = Color.Transparent,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp),
+    ) {
+        Column {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Icon(
+                    icon,
+                    contentDescription = "icon",
+                    modifier = Modifier.size(24.dp),
+                )
+                Spacer(modifier = Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f).padding(8.dp)) {
+                    Text(
+                        text = name,
+                        style = MaterialTheme.typography.bodyLarge,
+                        textAlign = TextAlign.Start,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        textAlign = TextAlign.Start,
+                    )
+                }
+                Switch(
+                    checked = checked,
+                    onCheckedChange = onCheckedChange,
+                )
+            }
+            if (showDivider) HorizontalDivider()
+        }
+    }
+}
+
+@Composable
+fun SettingsSegmented(
+    icon: Painter,
+    name: String,
+    summary: String,
+    selectedMode: ThemeMode,
+    onModeSelected: (ThemeMode) -> Unit,
+    showDivider: Boolean = true,
+) {
+    val modes = listOf(ThemeMode.System, ThemeMode.Light, ThemeMode.Dark)
+
+    Surface(
+        color = Color.Transparent,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp),
+    ) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    icon,
+                    contentDescription = "icon",
+                    modifier = Modifier.size(24.dp),
+                )
+                Spacer(modifier = Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f).padding(8.dp)) {
+                    Text(
+                        text = name,
+                        style = MaterialTheme.typography.bodyLarge,
+                        textAlign = TextAlign.Start,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        textAlign = TextAlign.Start,
+                    )
+                }
+            }
+            SingleChoiceSegmentedButtonRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+            ) {
+                modes.forEachIndexed { index, mode ->
+                    SegmentedButton(
+                        selected = selectedMode == mode,
+                        onClick = { onModeSelected(mode) },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = modes.size),
+                        label = { Text(themeModeLabel(mode)) },
+                    )
+                }
+            }
+            if (showDivider) HorizontalDivider()
+        }
+    }
+}
+
+private fun themeModeLabel(mode: ThemeMode): String = when (mode) {
+    ThemeMode.System -> "System"
+    ThemeMode.Light -> "Light"
+    ThemeMode.Dark -> "Dark"
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsText(
+    icon: Painter,
+    name: String,
+    onClick: () -> Unit,
+    showDivider: Boolean = true,
+) {
+    Surface(
+        color = Color.Transparent,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp),
+        onClick = onClick,
+    ) {
+        Column {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Icon(
+                    icon,
+                    contentDescription = "icon",
+                    modifier = Modifier
+                        .size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(16.dp))
+                Text(
+                    modifier = Modifier.padding(8.dp),
+                    text = name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    textAlign = TextAlign.Start,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (showDivider) HorizontalDivider()
+        }
+    }
+}
+
+/**
+ * [isDialogShown] is hoisted rather than remembered here because closing it is an outcome of the
+ * change, not of the tap that dismissed it: while [isChangingPassword] is set the dialog refuses
+ * every way out — the scrim, the back button and the save button all — because navigating away is
+ * what kills the ViewModel running the change, and a master-password change that is cancelled
+ * halfway is silently discarded.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsTextWithDialog(
+    icon: Painter,
+    name: String,
+    oldPassword: String,
+    newPassword: String,
+    isDialogShown: Boolean,
+    isChangingPassword: Boolean,
+    errorMessage: String?,
+    onOldPassUpdated: (String) -> Unit,
+    onNewPassUpdated: (String) -> Unit,
+    onOpen: () -> Unit,
+    onDismiss: () -> Unit,
+    onSave: () -> Unit,
+    showDivider: Boolean = true,
+) {
+    // todo move dialog to app nav graph
+    if (isDialogShown) {
+        Dialog(
+            onDismissRequest = {
+                if (!isChangingPassword) onDismiss()
+            },
+            properties = DialogProperties(
+                dismissOnBackPress = !isChangingPassword,
+                dismissOnClickOutside = !isChangingPassword,
+            ),
+        ) {
+            TextEditDialog(
+                name = name,
+                oldPassword = oldPassword,
+                newPassword = newPassword,
+                isChangingPassword = isChangingPassword,
+                errorMessage = errorMessage,
+                onOldPassUpdated = onOldPassUpdated,
+                onNewPassUpdated = onNewPassUpdated,
+                onSave = onSave,
+            )
+        }
+    }
+
+    Surface(
+        color = Color.Transparent,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp),
+        onClick = onOpen,
+    ) {
+        Column {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Start
+            ) {
+                Icon(
+                    icon,
+                    contentDescription = "settings text icon",
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(16.dp))
+                Text(
+                    modifier = Modifier.padding(8.dp),
+                    text = name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    textAlign = TextAlign.Start,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (showDivider) HorizontalDivider()
+        }
+    }
+}
+
+@Composable
+private fun TextEditDialog(
+    name: String,
+    oldPassword: String,
+    newPassword: String,
+    isChangingPassword: Boolean,
+    errorMessage: String?,
+    onOldPassUpdated: (String) -> Unit,
+    onNewPassUpdated: (String) -> Unit,
+    onSave: () -> Unit,
+) {
+    var oldPasswordVisible by remember { mutableStateOf(false) }
+    var newPasswordVisible by remember { mutableStateOf(false) }
+
+    Surface(
+        color = MaterialTheme.colorScheme.primary,
+        contentColor = MaterialTheme.colorScheme.onPrimary,
+        // The dialog is its own window with its own focus owner; this handler is composed here,
+        // inside the Dialog content lambda, so it captures the DIALOG's focus manager — it must
+        // never move to the Dialog call's parameters in the host composition. Gated like the
+        // Next button.
+        modifier = Modifier.formKeyboardNavigation(
+            onSubmit = {
+                if (!isChangingPassword) {
+                    onSave()
+                    true
+                } else {
+                    false
+                }
+            },
+        ),
+    ) {
+        Column(
+            modifier = Modifier
+                .wrapContentHeight()
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Text(name)
+            Spacer(modifier = Modifier.height(8.dp))
+            TextField(
+                oldPassword,
+                enabled = !isChangingPassword,
+                label = { Text("Old Password", color = MaterialTheme.colorScheme.onSurface) },
+                singleLine = true,
+                visualTransformation = if (oldPasswordVisible) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                trailingIcon = {
+                    PasswordVisibilityToggle(
+                        visible = oldPasswordVisible,
+                        onToggle = { oldPasswordVisible = !oldPasswordVisible },
+                        contentDescription = "Toggle old password visibility",
+                    )
+                },
+                onValueChange = {
+                onOldPassUpdated(it)
+            })
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            TextField(
+                newPassword,
+                enabled = !isChangingPassword,
+                label = { Text("New Password", color = MaterialTheme.colorScheme.onSurface) },
+                singleLine = true,
+                visualTransformation = if (newPasswordVisible) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                trailingIcon = {
+                    PasswordVisibilityToggle(
+                        visible = newPasswordVisible,
+                        onToggle = { newPasswordVisible = !newPasswordVisible },
+                        contentDescription = "Toggle new password visibility",
+                    )
+                },
+                onValueChange = {
+                onNewPassUpdated(it)
+            })
+
+            if (isChangingPassword) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Changing your master password. This takes a few seconds — please keep " +
+                        "this screen open until it finishes.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            } else if (errorMessage != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = errorMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+
+            Row {
+                Spacer(modifier = Modifier.weight(1f))
+                PassmanPrimaryButton(
+                    enabled = !isChangingPassword,
+                    // The dialog is dismissed by the outcome, never by the click: a change that
+                    // fails has to stay on screen, and a change still running must not be walked
+                    // away from.
+                    onClick = onSave,
+                ) {
+                    if (isChangingPassword) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.padding(end = 8.dp),
+                            // The spinner only shows while the button is disabled, so it sits on
+                            // the 12%-alpha disabled fill, not primary: onSurface, not onPrimary.
+                            color = MaterialTheme.colorScheme.onSurface,
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                    Text("Next", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,253 @@
+########################################################################################
+# Canonical dependency catalog for passmanShared and passmanClient.
+#
+# passmanClient imports this file by path in its settings.gradle.kts, so there is exactly
+# one source of truth for both builds. k2k deliberately keeps its own catalog — see
+# docs/plans/2026-08-02-dependency-cleanup-design.md for why.
+#
+# Rules:
+#   - Every dependency lives here. No coordinates hardcoded in build.gradle.kts.
+#   - No inline versions in [libraries]. Use a [versions] ref.
+#   - Grouped by concern, alphabetized within a group.
+########################################################################################
+
+[versions]
+
+## SDK levels
+minSdk = "31"
+targetSdk = "36"
+compileSdk = "37"
+
+## Toolchain
+agp = "9.3.1"
+kotlin = "2.4.10"
+
+## Kotlinx
+coroutines = "1.11.0"
+kotlinx-datetime = "0.8.0"
+kotlinx-serialization = "1.11.0"
+
+## Compose
+compose-multiplatform = "1.11.1"
+# Compose Multiplatform ships three independent version tracks. material3 and
+# material-icons-extended are NOT on the core version; the plugin's own defaults pin them
+# here, and both are current as of 2026-08-02.
+compose-material3 = "1.9.0"
+# Frozen upstream: JetBrains stopped updating material-icons-extended after 1.7.3 and
+# points at Material Symbols (vector resources) instead. Pinned explicitly so the
+# staleness is visible rather than hidden behind the compose.materialIconsExtended
+# accessor. Migrating off it is UI source work, tracked separately.
+# Note: the M2 compose-material catalog entry below is unused by every module since the
+# 2026-08 Material 3 migration (docs/plans/2026-08-12-material3-theming-plan.md); it is
+# retained only so the catalog does not churn. The icons-extended artifact does not
+# depend on it — androidx.compose.material.icons.* keeps compiling without M2.
+compose-material-icons = "1.7.3"
+navigationCompose = "2.9.2"
+accompanistPermissions = "0.37.3"
+
+## AndroidX
+androidxActivityCompose = "1.13.0"
+androidxAnnotation = "1.10.0"
+androidxAppcompat = "1.7.1"
+androidxBiometric = "1.1.0"
+androidxCamera = "1.6.0"
+androidxCoreKtx = "1.19.0"
+androidxLifecycleViewmodel = "2.11.0"
+googleMaterial = "1.14.0"
+# Deprecated by Google as of 1.1.0-beta01 (all APIs). Retained only so the migration shim
+# in AndroidEncryptionSettingsFactory can read the legacy EncryptedSharedPreferences store.
+# Delete this, the shim, and its imports once every install has migrated.
+androidxSecurityCrypto = "1.1.0"
+
+## DI and networking
+koin = "4.2.2"
+ktor = "3.5.2"
+
+## Crypto
+bouncy = "1.85"
+# bcprov-only patch release; fixes BigIntegers.intValueExact crash paths on old Android
+# (bc-java #2369). bcpg/bcpkix/bcutil have no 1.85.2 - mixed BC versions are upstream-normal.
+# strictly: otherwise a future `bouncy` bump would silently outrank this pin via bcpg's
+# transitive bcprov dependency. Drop bouncyProv entirely when bumping to >= 1.86.
+bouncyProv = { strictly = "1.85.2" }
+web3jCrypto = "4.11.3"
+# QR decode/encode for TOTP seed import. Plain JVM artifact, JVM/Android only.
+zxing = "3.5.3"
+
+## Local storage
+credentialStorage = "1.0.3"
+jna = "5.19.1"
+multiplatformSettings = "1.3.0"
+
+## Test
+assertj = "3.27.7"
+javaxInject = "1"
+junit = "4.13.2"
+mockk = "1.14.11"
+
+## Android instrumentation test
+androidxArchCoreTesting = "2.2.0"
+androidxTestCore = "1.7.0"
+androidxTestExtJunit = "1.3.0"
+androidxTestOrchestrator = "1.6.1"
+androidxTestRules = "1.7.0"
+androidxTestRunner = "1.7.0"
+androidxTestUiautomator = "2.4.0"
+espresso = "3.7.0"
+
+[libraries]
+
+## Gradle plugins resolved as dependencies by build-logic
+android-gradle-plugin = { module = "com.android.tools.build:gradle", version.ref = "agp" }
+kotlin-gradle-plugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
+
+## Kotlin
+kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+kotlin-test-js = { module = "org.jetbrains.kotlin:kotlin-test-js", version.ref = "kotlin" }
+kotlin-test-junit = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
+
+## Kotlinx
+kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+kotlinx-coroutines-swing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
+kotlinx-datetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.ref = "kotlinx-datetime" }
+kotlinx-serialization = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinx-serialization" }
+
+## Koin
+koin-android = { module = "io.insert-koin:koin-android", version.ref = "koin" }
+koin-androidx-compose = { module = "io.insert-koin:koin-androidx-compose", version.ref = "koin" }
+koin-androidx-compose-navigation = { module = "io.insert-koin:koin-androidx-compose-navigation", version.ref = "koin" }
+koin-compose = { module = "io.insert-koin:koin-compose", version.ref = "koin" }
+koin-composeVM = { module = "io.insert-koin:koin-compose-viewmodel", version.ref = "koin" }
+koin-core = { module = "io.insert-koin:koin-core", version.ref = "koin" }
+
+## Ktor
+ktor-client-cio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
+ktor-client-content-negotiation = { module = "io.ktor:ktor-client-content-negotiation", version.ref = "ktor" }
+ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
+ktor-client-okhttp = { module = "io.ktor:ktor-client-okhttp", version.ref = "ktor" }
+ktor-network = { module = "io.ktor:ktor-network", version.ref = "ktor" }
+ktor-network-tls = { module = "io.ktor:ktor-network-tls", version.ref = "ktor" }
+ktor-serialization-kotlinx-json = { module = "io.ktor:ktor-serialization-kotlinx-json", version.ref = "ktor" }
+ktor-server-cio = { module = "io.ktor:ktor-server-cio", version.ref = "ktor" }
+ktor-server-content-negotiation = { module = "io.ktor:ktor-server-content-negotiation", version.ref = "ktor" }
+ktor-server-core = { module = "io.ktor:ktor-server-core", version.ref = "ktor" }
+ktor-server-netty = { module = "io.ktor:ktor-server-netty", version.ref = "ktor" }
+
+## Compose
+accompanist-permissions = { module = "com.google.accompanist:accompanist-permissions", version.ref = "accompanistPermissions" }
+navigation-compose = { module = "org.jetbrains.androidx.navigation:navigation-compose", version.ref = "navigationCompose" }
+navigation-material-compose = { module = "org.jetbrains.compose.material:material-navigation", version.ref = "compose-multiplatform" }
+
+## Compose Multiplatform. Declared explicitly because every `compose.*` accessor in the
+## Gradle plugin is deprecated as of 1.11.1 with "Specify dependency directly", and the
+## androidx compose-bom is gone — CMP is now the single version source for Compose on all
+## platforms, which also removes the checkComposeLibrariesCompatibility mismatch.
+## compose.desktop.* is not deprecated and stays as an accessor: it resolves an
+## OS-specific artifact at configuration time.
+compose-animation = { module = "org.jetbrains.compose.animation:animation", version.ref = "compose-multiplatform" }
+compose-components-resources = { module = "org.jetbrains.compose.components:components-resources", version.ref = "compose-multiplatform" }
+compose-components-ui-tooling-preview = { module = "org.jetbrains.compose.components:components-ui-tooling-preview", version.ref = "compose-multiplatform" }
+compose-foundation = { module = "org.jetbrains.compose.foundation:foundation", version.ref = "compose-multiplatform" }
+compose-material = { module = "org.jetbrains.compose.material:material", version.ref = "compose-multiplatform" }
+compose-material-icons-extended = { module = "org.jetbrains.compose.material:material-icons-extended", version.ref = "compose-material-icons" }
+compose-material3 = { module = "org.jetbrains.compose.material3:material3", version.ref = "compose-material3" }
+compose-runtime = { module = "org.jetbrains.compose.runtime:runtime", version.ref = "compose-multiplatform" }
+compose-ui = { module = "org.jetbrains.compose.ui:ui", version.ref = "compose-multiplatform" }
+compose-ui-tooling = { module = "org.jetbrains.compose.ui:ui-tooling", version.ref = "compose-multiplatform" }
+compose-ui-tooling-preview = { module = "org.jetbrains.compose.ui:ui-tooling-preview", version.ref = "compose-multiplatform" }
+compose-ui-util = { module = "org.jetbrains.compose.ui:ui-util", version.ref = "compose-multiplatform" }
+
+## AndroidX
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidxActivityCompose" }
+androidx-annotation = { module = "androidx.annotation:annotation", version.ref = "androidxAnnotation" }
+androidx-appcompat = { module = "androidx.appcompat:appcompat", version.ref = "androidxAppcompat" }
+androidx-biometric = { module = "androidx.biometric:biometric", version.ref = "androidxBiometric" }
+androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "androidxCamera" }
+androidx-camera-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "androidxCamera" }
+androidx-camera-view = { module = "androidx.camera:camera-view", version.ref = "androidxCamera" }
+androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "androidxCoreKtx" }
+androidx-lifecycle-viewmodel = { module = "androidx.lifecycle:lifecycle-viewmodel", version.ref = "androidxLifecycleViewmodel" }
+androidx-security-crypto = { module = "androidx.security:security-crypto", version.ref = "androidxSecurityCrypto" }
+# Resource-only dependency: apps/droid's theme parents on Theme.MaterialComponents.*.
+# Nothing imports com.google.android.material, so source grep will not show this as used.
+google-material = { module = "com.google.android.material:material", version.ref = "googleMaterial" }
+
+## Crypto — BouncyCastle. JVM/Android only; never add to a common or iOS source set.
+bcpg = { module = "org.bouncycastle:bcpg-jdk18on", version.ref = "bouncy" }
+bcpkix = { module = "org.bouncycastle:bcpkix-jdk18on", version.ref = "bouncy" }
+bcprov = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncyProv" }
+bcutil = { module = "org.bouncycastle:bcutil-jdk18on", version.ref = "bouncy" }
+# JVM/Android only; never add to a common or iOS source set.
+zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
+
+## Local storage
+credential-storage-jvm = { module = "com.microsoft:credential-secure-storage", version.ref = "credentialStorage" }
+jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
+multiplatform-settings = { module = "com.russhwolf:multiplatform-settings", version.ref = "multiplatformSettings" }
+multiplatform-settings-coroutines = { module = "com.russhwolf:multiplatform-settings-coroutines", version.ref = "multiplatformSettings" }
+multiplatform-settings-observable = { module = "com.russhwolf:multiplatform-settings-make-observable", version.ref = "multiplatformSettings" }
+multiplatform-settings-serialization = { module = "com.russhwolf:multiplatform-settings-serialization", version.ref = "multiplatformSettings" }
+multiplatform-settings-test = { module = "com.russhwolf:multiplatform-settings-test", version.ref = "multiplatformSettings" }
+
+## Test
+assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
+javax-inject = { module = "javax.inject:javax.inject", version.ref = "javaxInject" }
+junit = { module = "junit:junit", version.ref = "junit" }
+mockk = { module = "io.mockk:mockk", version.ref = "mockk" }
+mockk-agent-jvm = { module = "io.mockk:mockk-agent-jvm", version.ref = "mockk" }
+
+## Android instrumentation test
+androidx-arch-core-testing = { module = "androidx.arch.core:core-testing", version.ref = "androidxArchCoreTesting" }
+androidx-espresso-core = { module = "androidx.test.espresso:espresso-core", version.ref = "espresso" }
+androidx-espresso-intents = { module = "androidx.test.espresso:espresso-intents", version.ref = "espresso" }
+androidx-espresso-web = { module = "androidx.test.espresso:espresso-web", version.ref = "espresso" }
+androidx-test-core = { module = "androidx.test:core", version.ref = "androidxTestCore" }
+androidx-test-ext-junit = { module = "androidx.test.ext:junit", version.ref = "androidxTestExtJunit" }
+androidx-test-orchestrator = { module = "androidx.test:orchestrator", version.ref = "androidxTestOrchestrator" }
+androidx-test-rules = { module = "androidx.test:rules", version.ref = "androidxTestRules" }
+androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidxTestRunner" }
+androidx-test-uiautomator = { module = "androidx.test.uiautomator:uiautomator", version.ref = "androidxTestUiautomator" }
+
+[bundles]
+
+# Repeated verbatim in data/repo, data/crypto, data/pgp, data/keystore and
+# data/local/platform. bcpg is only needed where OpenPGP is used, so the two
+# non-PGP consumers take the individual artifacts instead of this bundle.
+bouncycastle = ["bcpg", "bcprov", "bcutil", "bcpkix"]
+bouncycastle-no-pgp = ["bcprov", "bcutil", "bcpkix"]
+
+# All four are used together in data/local/platform.
+multiplatform-settings = [
+    "multiplatform-settings",
+    "multiplatform-settings-serialization",
+    "multiplatform-settings-observable",
+    "multiplatform-settings-coroutines",
+]
+
+# Standard JVM unit-test stack.
+test-jvm = ["kotlin-test-junit", "junit", "mockk", "mockk-agent-jvm", "assertj-core"]
+
+# Espresso and the androidx test runners, applied together by the Android convention plugin.
+android-instrumentation-test = [
+    "androidx-arch-core-testing",
+    "androidx-test-core",
+    "androidx-test-ext-junit",
+    "androidx-test-orchestrator",
+    "androidx-test-rules",
+    "androidx-test-runner",
+    "androidx-test-uiautomator",
+    "androidx-espresso-core",
+    "androidx-espresso-intents",
+    "androidx-espresso-web",
+]
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-kotlin-multiplatform-library = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+jetbrains-compose = { id = "org.jetbrains.compose", version.ref = "compose-multiplatform" }
+kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

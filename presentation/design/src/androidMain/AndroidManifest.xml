@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="ai.passman.design">
+    <!-- Live TOTP QR scanning. Not required: every camera-less device keeps the image-import path. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+</manifest>

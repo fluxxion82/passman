@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext HTTP is permitted because the device-pairing bootstrap (the k2k pairing
+  listener on port 2324) is plaintext by design: it exchanges only public identity
+  bundles, and authenticity comes from the human-compared safety number, not from the
+  channel. Android cannot scope this exemption to dynamic LAN peer addresses, so it is
+  app-wide. All vault, PGP, and keystore sync traffic uses the separate mTLS data
+  channel regardless of this setting.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
