@@ -1,6 +1,6 @@
 # Security Policy
 
-Passman is a local-only password manager: there is no server component, and vaults never leave the user's devices except over the LAN sync described in the [security model](docs/security-model.md). Vulnerabilities in the crypto, key storage, pairing, or sync layers are all in scope, including the `k2k` submodule.
+Passman is a local-only password manager: there is no server component, and vaults never leave the user's devices except over the LAN sync described in the [README](README.md). Vulnerabilities in the crypto, key storage, pairing, or sync layers are all in scope, including the `k2k` submodule.
 
 ## Reporting a vulnerability
 
@@ -12,4 +12,4 @@ Email **sterling.albury@gmail.com** with a description of the issue, the affecte
 
 - The project is maintained by one person and has **not** had an independent security audit.
 - Only the latest release is supported; cross-version sync is explicitly unsupported.
-- Known, accepted limits (for example, the RSA-2048 transport identity) are documented in the [security model](docs/security-model.md) — reports about documented accepted risks are still welcome if they change the practical picture.
+- Known, accepted limits (for example, the RSA-2048 transport identity) are documented in the [README](README.md) — reports about documented accepted risks are still welcome if they change the practical picture.

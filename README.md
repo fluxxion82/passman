@@ -14,8 +14,6 @@ There is no cloud, no account server, and no telemetry. Vaults live on your devi
 - **Explicit pairing ceremony.** Devices pair by comparing a 25-digit safety number rendered on both screens — no trust-on-first-use. Nothing is persisted until both sides confirm a match.
 - **Compose Multiplatform UI** shared between Android and Desktop; an iOS port is planned.
 
-The full security model — key hierarchy, threat model, and known limits — is in [docs/security-model.md](docs/security-model.md).
-
 ## How syncing works
 
 Sync is manual, mutual, and local. Two paired devices exchange one artifact at a time — passwords, PGP keys, or keystores — directly over your LAN. There is no background sync, no relay, and nothing listens when you are not actively syncing.
@@ -44,7 +42,7 @@ Transfers are whole-artifact — the full password vault, or complete key bundle
 - **PGP keys** — public *and secret* keyrings, matched by filename.
 - **Keystores** — keystore files, matched by filename.
 
-Device identity and recovery material is **never** synced, in either direction: `<user>.pfx` (and its `.bak` / `.lock` siblings), `keyring.pmk` / `keyring.pmk.next`, `hybrid.key`, `mldsa.key`, `portable-recovery.pmk` / `.previous`, and `<user>.recovery.p12` / `.crt`. Each device generates its own. The consequence is worth stating plainly: **a second device is not a backup.** It replicates your entries, but not the keys that unlock them on this device — back up `keystore/<user>/` yourself (the [security model](docs/security-model.md) covers what to copy and why).
+Device identity and recovery material is **never** synced, in either direction: `<user>.pfx` (and its `.bak` / `.lock` siblings), `keyring.pmk` / `keyring.pmk.next`, `hybrid.key`, `mldsa.key`, `portable-recovery.pmk` / `.previous`, and `<user>.recovery.p12` / `.crt`. Each device generates its own. The consequence is worth stating plainly: **a second device is not a backup.** It replicates your entries, but not the keys that unlock them on this device — back up the whole `keystore/<user>/` directory yourself.
 
 One expected quirk: the `<profile> passman keystore` and `<profile> passman pgp` entries the app creates when provisioning a profile are per-device, but the keystore file behind them shares one filename. If both devices provisioned before their first sync, the received file overwrites the local one and you will see two identically-named entries with different passwords — the one that opens the surviving file is the keeper; delete the other.
 
@@ -53,8 +51,6 @@ One expected quirk: the `<profile> passman keystore` and `<profile> passman pgp`
 For the technically curious: sync data moves over mutual TLS on port 2323 — client certificates required, TLS 1.3 preferred with 1.2 permitted, both ends pinned to the exact certificates (SPKI) exchanged at pairing. Inside that channel, payloads are additionally sealed to public keys pinned during the ceremony: X25519 + ML-KEM-768 hybrid encryption, plus an ML-DSA-65 signature on upgraded pairings. Pairings made before the post-quantum upgrade still use classical RSA-OAEP + AES-GCM sealing until the ceremony is re-run from the Trusted Devices screen. The transport identity itself is RSA-2048 and is **not** quantum-resistant; the payload sealing is what covers harvest-now-decrypt-later.
 
 The pairing port (2324) is plaintext **by design**: the safety number authenticates a pairing, not the channel. It serves only public identity material, is rate-limited, caps requests at 16 KiB, exposes no vault data, and is open only while the Trusted Devices screen is showing.
-
-Full detail — key hierarchy, threat model, accepted risks — is in [docs/security-model.md](docs/security-model.md).
 
 ### How conflicts resolve
 
@@ -96,8 +92,6 @@ cd passman
 ```
 
 JDK 17 is required. `--recurse-submodules` matters: [`k2k`](https://github.com/fluxxion82/k2k), the LAN transfer library, lives in its own repo because it is a standalone Apache-2.0 library usable outside this project. If you already cloned without it, `git submodule update --init` fixes things.
-
-Module map, the convention plugins, the test and lint aggregators, and the conventions worth knowing before editing are in [docs/development.md](docs/development.md).
 
 ## Repository layout
 

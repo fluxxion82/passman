@@ -90,3 +90,7 @@ CLAUDE.md
 
 # Kotlin build metadata
 .kotlin/
+
+# Working notes and generated lockfiles — not part of the published source
+docs/
+kotlin-js-store/
