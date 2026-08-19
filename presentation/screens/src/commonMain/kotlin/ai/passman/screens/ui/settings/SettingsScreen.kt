@@ -1,6 +1,7 @@
 package ai.passman.screens.ui.settings
 
 import ai.passman.design.settings.SettingsContent
+import ai.passman.screens.ui.SyncActivityRoute
 import ai.passman.screens.ui.TransferPasswords
 import ai.passman.screens.ui.TrustedDevicesRoute
 import ai.passman.domain.settings.model.ThemeMode
@@ -12,6 +13,7 @@ import androidx.compose.material.icons.filled.ChangeHistory
 import androidx.compose.material.icons.filled.Brightness6
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.ImportExport
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.runtime.*
@@ -71,12 +73,14 @@ fun SettingsScreen(
         changePassIcon = rememberVectorPainter(image = Icons.Filled.ChangeHistory),
         transferIcon = rememberVectorPainter(image = Icons.Filled.ImportExport),
         manageDevicesIcon = rememberVectorPainter(image = Icons.Filled.Devices),
+        syncActivityIcon = rememberVectorPainter(image = Icons.Filled.History),
         privacyIcon = rememberVectorPainter(image = Icons.Filled.Security),
         clipboardIcon = rememberVectorPainter(image = Icons.Filled.ContentPaste),
         themeIcon = rememberVectorPainter(image = Icons.Filled.Brightness6),
         onChangePasswordClicked = presenter::onChangePasswordClicked,
         onTransferClick = presenter::onTransferClick,
         onManageDevicesClick = { navController.navigate(TrustedDevicesRoute) },
+        onSyncActivityClick = { navController.navigate(SyncActivityRoute) },
         onPrivacyPolicyClick = { uriHandler.openUri(PRIVACY_POLICY_URL) },
         onClipboardExpiryToggled = presenter::onClipboardExpiryToggled,
         themeMode = themeMode,
@@ -111,12 +115,14 @@ fun PreviewSettings() {
         changePassIcon = rememberVectorPainter(image = Icons.Filled.ChangeHistory),
         transferIcon = rememberVectorPainter(image = Icons.Filled.ImportExport),
         manageDevicesIcon = rememberVectorPainter(image = Icons.Filled.Devices),
+        syncActivityIcon = rememberVectorPainter(image = Icons.Filled.History),
         privacyIcon = rememberVectorPainter(image = Icons.Filled.Security),
         clipboardIcon = rememberVectorPainter(image = Icons.Filled.ContentPaste),
         themeIcon = rememberVectorPainter(image = Icons.Filled.Brightness6),
         onChangePasswordClicked = {},
         onTransferClick = {},
         onManageDevicesClick = {},
+        onSyncActivityClick = {},
         onPrivacyPolicyClick = {},
         onClipboardExpiryToggled = {},
         themeMode = ThemeMode.System,

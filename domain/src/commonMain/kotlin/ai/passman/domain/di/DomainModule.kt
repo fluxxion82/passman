@@ -83,10 +83,13 @@ import ai.passman.domain.pgp.VerifyClearSignature
 import ai.passman.domain.pgp.VerifySignaturePGP
 import ai.passman.domain.pgp.persistence.InMemoryPgpEventPersistence
 import ai.passman.domain.pgp.persistence.PgpEventPersistence
+import ai.passman.domain.settings.ClearSyncLog
 import ai.passman.domain.settings.CopyToClipboard
 import ai.passman.domain.settings.GetClipboardExpiry
 import ai.passman.domain.settings.GetPortableVaultAccess
+import ai.passman.domain.settings.GetSyncLog
 import ai.passman.domain.settings.GetThemeMode
+import ai.passman.domain.settings.RecordSyncOutcome
 import ai.passman.domain.settings.UpgradePortableVaultRecovery
 import ai.passman.domain.settings.SetClipboardExpiry
 import ai.passman.domain.settings.SetThemeMode
@@ -227,6 +230,9 @@ val domainModule = module {
     single { GetIpAddress(transferRepository = get()) }
     single { ExecuteReconcileAction(transferRepository = get(), passwordEventPersistence = get()) }
     single { ShareFile(settingsService = get()) }
+    single { RecordSyncOutcome(syncLogRepository = get(), trustedDevices = get()) }
+    single { GetSyncLog(repository = get()) }
+    single { ClearSyncLog(repository = get()) }
     single {
         SyncPasswords(
             passwordRepository = get(),
@@ -234,6 +240,7 @@ val domainModule = module {
             trustedDevices = get(),
             fingerprintService = get(),
             passwordEventPersistence = get(),
+            recordSyncOutcome = get(),
         )
     }
     single {
@@ -243,6 +250,7 @@ val domainModule = module {
             trustedDevices = get(),
             fingerprintService = get(),
             pgpEventPersistence = get(),
+            recordSyncOutcome = get(),
         )
     }
     single {
@@ -252,6 +260,7 @@ val domainModule = module {
             trustedDevices = get(),
             fingerprintService = get(),
             keystoreEventPersistence = get(),
+            recordSyncOutcome = get(),
         )
     }
 

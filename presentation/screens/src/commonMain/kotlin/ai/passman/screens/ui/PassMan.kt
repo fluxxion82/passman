@@ -21,6 +21,7 @@ import ai.passman.screens.ui.pgp.userid.add.AddUserIdScreen
 import ai.passman.screens.ui.pgp.userid.remove.RemoveUserIdScreen
 import ai.passman.screens.ui.settings.ReconcileScreen
 import ai.passman.screens.ui.settings.SettingsScreen
+import ai.passman.screens.ui.settings.SyncActivityScreen
 import ai.passman.screens.ui.settings.TransferScreen
 import ai.passman.screens.ui.settings.TrustedDevicesScreen
 import ai.passman.screens.ui.signup.SignupScreen
@@ -50,6 +51,7 @@ import ai.passman.viewmodel.settings.SettingsViewModel
 import ai.passman.viewmodel.settings.TransferViewModel
 import ai.passman.viewmodel.signup.SignUpViewModel
 import ai.passman.viewmodel.splash.SplashViewModel
+import ai.passman.viewmodel.sync.SyncActivityViewModel
 import ai.passman.domain.settings.model.ThemeMode
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.RowScope
@@ -446,5 +448,15 @@ fun NavGraphBuilder.settingsGraph(
         }
         val presenter: TrustedDevicesViewModel = koinViewModel()
         TrustedDevicesScreen(navController = navController, presenter = presenter)
+    }
+
+    composable<SyncActivityRoute> {
+        // Deeper screen off Settings: show the top-bar back button (like PGP/keystore details).
+        LaunchedEffect(Unit) {
+            showDrawer.value = false
+            showBack.value = true
+        }
+        val presenter: SyncActivityViewModel = koinViewModel()
+        SyncActivityScreen(navController = navController, presenter = presenter)
     }
 }

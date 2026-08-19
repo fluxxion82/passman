@@ -12,6 +12,8 @@ class FakePasswordRepository(
     private val entries: () -> List<PasswordEntry> = { unsupported("getPasswordEntries") },
     private val add: suspend (AddPassword.EntryData) -> Boolean = { unsupported("addPasswordEntry") },
     private val list: suspend () -> Outcome<List<PasswordEntry>> = { Outcome.Success(entries()) },
+    private val push: suspend (String) -> Outcome<Unit> = { unsupported("pushPasswordDatabase") },
+    private val pull: suspend (String) -> Outcome<Unit> = { unsupported("pullPasswordDatabase") },
 ) : PasswordRepository {
 
     val added = mutableListOf<AddPassword.EntryData>()
@@ -31,8 +33,8 @@ class FakePasswordRepository(
         unsupported("deletePasswordEntries")
     override suspend fun transferPasswordDatabase(hostName: String): Outcome<Unit> =
         unsupported("transferPasswordDatabase")
-    override suspend fun pushPasswordDatabase(hostName: String): Outcome<Unit> = unsupported("pushPasswordDatabase")
-    override suspend fun pullPasswordDatabase(hostName: String): Outcome<Unit> = unsupported("pullPasswordDatabase")
+    override suspend fun pushPasswordDatabase(hostName: String): Outcome<Unit> = push(hostName)
+    override suspend fun pullPasswordDatabase(hostName: String): Outcome<Unit> = pull(hostName)
 
     companion object {
         private fun unsupported(name: String): Nothing =

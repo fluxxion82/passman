@@ -17,6 +17,8 @@ class FakeKeystoreRepository(
         { unsupported("createKeyStore") },
     private val delete: (path: String, name: String, password: String) -> Boolean =
         { _, _, _ -> unsupported("deleteKeystore") },
+    private val push: suspend (String) -> Outcome<Unit> = { unsupported("pushKeystores") },
+    private val pull: suspend (String) -> Outcome<Unit> = { unsupported("pullKeystores") },
 ) : KeystoreRepository {
 
     val createRequests = mutableListOf<CreateKeyStore.CreateRequest>()
@@ -112,8 +114,8 @@ class FakeKeystoreRepository(
     ): Outcome<Boolean> = unsupported("verifySignatureFile")
     override suspend fun getPublicKeyBytes(): ByteArray = unsupported("getPublicKeyBytes")
     override suspend fun transferKeystores(hostName: String): Outcome<Unit> = unsupported("transferKeystores")
-    override suspend fun pushKeystores(hostName: String): Outcome<Unit> = unsupported("pushKeystores")
-    override suspend fun pullKeystores(hostName: String): Outcome<Unit> = unsupported("pullKeystores")
+    override suspend fun pushKeystores(hostName: String): Outcome<Unit> = push(hostName)
+    override suspend fun pullKeystores(hostName: String): Outcome<Unit> = pull(hostName)
     override fun clearKeyStore(): Unit = unsupported("clearKeyStore")
 
     companion object {

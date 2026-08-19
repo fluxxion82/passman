@@ -29,6 +29,8 @@ class FakePgpRepository(
     private val createDefaultRings: suspend (passphrase: String) -> Outcome<Unit> =
         { unsupported("createDefaultKeyRings") },
     private val deleteDefaultRings: () -> Outcome<Unit> = { unsupported("deleteDefaultKeyRings") },
+    private val push: suspend (String) -> Outcome<Unit> = { unsupported("pushPgpKeys") },
+    private val pull: suspend (String) -> Outcome<Unit> = { unsupported("pullPgpKeys") },
 ) : PgpRepository {
 
     val encryptCalls = mutableListOf<Pair<String, String>>()
@@ -186,8 +188,8 @@ class FakePgpRepository(
     }
 
     override suspend fun transferPgpKeys(hostName: String): Outcome<Unit> = unsupported("transferPgpKeys")
-    override suspend fun pushPgpKeys(hostName: String): Outcome<Unit> = unsupported("pushPgpKeys")
-    override suspend fun pullPgpKeys(hostName: String): Outcome<Unit> = unsupported("pullPgpKeys")
+    override suspend fun pushPgpKeys(hostName: String): Outcome<Unit> = push(hostName)
+    override suspend fun pullPgpKeys(hostName: String): Outcome<Unit> = pull(hostName)
 
     companion object {
         private fun unsupported(name: String): Nothing =

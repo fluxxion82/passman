@@ -1,7 +1,7 @@
 package ai.passman.screens.ui.sync
 
+import ai.passman.domain.settings.friendlyMessage
 import ai.passman.domain.settings.model.SyncSessionState
-import ai.passman.viewmodel.sync.friendlyMessage
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column

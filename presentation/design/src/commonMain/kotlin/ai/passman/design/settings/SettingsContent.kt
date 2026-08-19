@@ -42,6 +42,7 @@ fun SettingsContent(
     changePassIcon: Painter,
     transferIcon: Painter,
     manageDevicesIcon: Painter,
+    syncActivityIcon: Painter,
     privacyIcon: Painter,
     clipboardIcon: Painter,
     themeIcon: Painter,
@@ -60,6 +61,7 @@ fun SettingsContent(
     onChangePasswordClicked: () -> Unit,
     onTransferClick: () -> Unit,
     onManageDevicesClick: () -> Unit,
+    onSyncActivityClick: () -> Unit,
     onPrivacyPolicyClick: () -> Unit,
     onClipboardExpiryToggled: (Boolean) -> Unit,
     onThemeModeSelected: (ThemeMode) -> Unit,
@@ -108,6 +110,12 @@ fun SettingsContent(
             icon = manageDevicesIcon,
             name = "Manage Paired Devices",
             onClick = onManageDevicesClick,
+        )
+
+        SettingsText(
+            icon = syncActivityIcon,
+            name = "Sync Activity",
+            onClick = onSyncActivityClick,
         )
 
         SettingsText(

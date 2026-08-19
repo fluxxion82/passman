@@ -4,12 +4,14 @@ import ai.passman.platform.prefs.impl.LocalClipboardPreferences
 import ai.passman.platform.prefs.impl.LocalCryptoPreferences
 import ai.passman.platform.prefs.impl.LocalKeystorePreferences
 import ai.passman.platform.prefs.impl.LocalPgpPreferences
+import ai.passman.platform.prefs.impl.LocalSyncLogRepository
 import ai.passman.platform.prefs.impl.LocalTrustedDevicesRepository
 import ai.passman.platform.prefs.impl.LocalUserPreferences
 import ai.passman.domain.connectivity.repository.TrustedDevicesRepository
 import ai.passman.domain.crypto.repository.CryptoPreferences
 import ai.passman.domain.keystore.repository.KeystorePreferences
 import ai.passman.domain.pgp.repository.PgpPreferences
+import ai.passman.domain.settings.repository.SyncLogRepository
 import ai.passman.domain.user.repository.UserPreferences
 import org.koin.dsl.module
 
@@ -33,6 +35,13 @@ val commonPlatformModule = module {
             encryptedFactory = get(),
             userPreferences = get(),
             userEvents = get(),
+            coroutinesContextFacade = get(),
+        )
+    }
+    single<SyncLogRepository> {
+        LocalSyncLogRepository(
+            encryptedFactory = get(),
+            userPreferences = get(),
             coroutinesContextFacade = get(),
         )
     }
