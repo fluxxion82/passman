@@ -1,6 +1,7 @@
 package ai.passman.platform.prefs.impl
 
 import ai.passman.platform.prefs.DesktopEncryptionSettingsFactory
+import ai.passman.repo.DesktopProfile
 import ai.passman.platform.prefs.EncryptionSettingsFactory
 import ai.passman.domain.base.CoroutinesContextFacade
 import ai.passman.domain.settings.model.ThemeMode
@@ -38,7 +39,7 @@ class LocalThemePreferencesTest {
 
     @Test
     fun `theme preference is readable without a user session`() = runBlocking {
-        val factory = DesktopEncryptionSettingsFactory()
+        val factory = DesktopEncryptionSettingsFactory(DesktopProfile.Debug)
         factory.createEncrypted("theme_prefs").remove("theme_mode")
         val preferences = LocalThemePreferences(
             encryptedFactory = factory,

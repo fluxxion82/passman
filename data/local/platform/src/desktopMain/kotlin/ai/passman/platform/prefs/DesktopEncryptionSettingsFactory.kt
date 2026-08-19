@@ -24,7 +24,7 @@ import kotlin.random.asKotlinRandom
 
 private const val MASTER_KEY_USER = "passman"
 
-class DesktopEncryptionSettingsFactory : EncryptionSettingsFactory {
+class DesktopEncryptionSettingsFactory(private val profile: DesktopProfile) : EncryptionSettingsFactory {
     override fun createEncrypted(name: String): Settings {
         val masterKey = loadOrCreateMasterKey()
         // Each named store gets its own child node. Previously `name` was ignored and every
@@ -32,7 +32,7 @@ class DesktopEncryptionSettingsFactory : EncryptionSettingsFactory {
         // so `clear()` on any store (e.g. the vault's clearKeys() at logout) wiped the login
         // credentials and trusted-device list too, locking the user out of their own vault.
         val safeName = name.replace(Regex("[^A-Za-z0-9_.-]"), "_")
-        val node = Preferences.userRoot().node("${DesktopProfile.encryptedNodeName}/$safeName")
+        val node = Preferences.userRoot().node("${profile.encryptedNodeName}/$safeName")
         migrateLegacyFlatNode(node)
         return PreferencesSettings(EncryptedPreferences(masterKey, node))
     }
@@ -46,7 +46,7 @@ class DesktopEncryptionSettingsFactory : EncryptionSettingsFactory {
     private fun migrateLegacyFlatNode(node: Preferences) {
         runCatching {
             if (node.keys().isNotEmpty()) return
-            val legacyPath = DesktopProfile.encryptedNodeName
+            val legacyPath = profile.encryptedNodeName
             if (!Preferences.userRoot().nodeExists(legacyPath)) return
             val legacy = Preferences.userRoot().node(legacyPath)
             val legacyKeys = legacy.keys()
@@ -61,13 +61,13 @@ class DesktopEncryptionSettingsFactory : EncryptionSettingsFactory {
     @OptIn(ExperimentalEncodingApi::class)
     private fun loadOrCreateMasterKey(): Key {
         val credentialStorage = StorageProvider.getCredentialStorage(true, StorageProvider.SecureOption.REQUIRED)
-        val storedMasterKey = credentialStorage.get(DesktopProfile.masterKeyName)?.password
+        val storedMasterKey = credentialStorage.get(profile.masterKeyName)?.password
         return if (storedMasterKey == null) {
             // Explicit 256-bit; the JCE default for "AES" is 128 (Android side already uses 256).
             val secretKey = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
             val keyChars = Base64.encode(secretKey.encoded)
-            KLogger.d { "DesktopEncryptionSettingsFactory: generating new master key (${DesktopProfile.masterKeyName})" }
-            credentialStorage.add(DesktopProfile.masterKeyName, StoredCredential(MASTER_KEY_USER, keyChars.toCharArray()))
+            KLogger.d { "DesktopEncryptionSettingsFactory: generating new master key (${profile.masterKeyName})" }
+            credentialStorage.add(profile.masterKeyName, StoredCredential(MASTER_KEY_USER, keyChars.toCharArray()))
             secretKey
         } else {
             val decodedKey = Base64.decode(storedMasterKey.concatToString())
@@ -78,7 +78,7 @@ class DesktopEncryptionSettingsFactory : EncryptionSettingsFactory {
 
 internal class EncryptedPreferences(
     private val secretKey: Key,
-    private val delegate: Preferences = userRoot().node(DesktopProfile.encryptedNodeName),
+    private val delegate: Preferences,
     javaRandom: SecureRandom = SecureRandom(),
 ) : Preferences() {
     private companion object {

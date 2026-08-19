@@ -1,6 +1,7 @@
 package ai.passman
 
 import ai.passman.di.config.buildConfigModule
+import ai.passman.di.buildVariantModule
 import ai.passman.di.loggingModule
 import ai.passman.design.PassmanTheme
 import ai.passman.domain.di.domainModule
@@ -63,6 +64,8 @@ class App: KoinComponent {
         startKoin {
             modules(
                 listOf(
+                    // First: everything variant-dependent resolves DesktopProfile from here.
+                    buildVariantModule,
                     buildConfigModule,
                     domainModule,
                     loggingModule,

@@ -87,3 +87,6 @@ xcuserdata/
 
 # Local agent notes
 CLAUDE.md
+
+# Kotlin build metadata
+.kotlin/

@@ -1,17 +1,5 @@
 package ai.passman.di
 
-import ai.passman.domain.base.CoroutineScopeFacade
-import ai.passman.domain.identification.model.DeviceInfo
-import ai.passman.domain.initialization.models.AppInformation
-import ai.passman.domain.initialization.models.Environment
-import ai.passman.domain.initialization.models.Version
-import ai.passman.logging.Logger
-import ai.passman.repo.Platform
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import org.koin.core.context.startKoin
-import org.koin.core.context.stopKoin
-import org.koin.dsl.module
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -72,52 +60,44 @@ class LoggingModuleTest {
     }
 
     @Test
-    fun `production profile registers no logging sinks`() {
-        val previousProfile = System.getProperty("passman.profile")
-        val dataDirectory = Files.createTempDirectory("passman-release-logging-test")
-        System.clearProperty("passman.profile")
+    fun `prod build variant registers no logging sink`() {
+        // The prod variant must bind no Logger at all: FileLogger creates its output file during
+        // construction, and even warning and error messages can carry account names, vault paths,
+        // or provider text. This is checked against the source rather than the Koin graph because
+        // only one variant is on the classpath at a time — under the default debug variant a
+        // graph-level assertion would pass without ever seeing the prod bindings.
+        val prodModule = repositoryRoot()
+            .resolve("apps/desk/src/prod/kotlin/ai/passman/di/BuildVariantModule.kt")
+        assertTrue(Files.exists(prodModule), "missing $prodModule")
 
-        try {
-            val app = startKoin {
-                modules(
-                    module {
-                        single<Platform> {
-                            object : Platform() {
-                                override fun getLocalPath() = dataDirectory.toString()
-                            }
-                        }
-                        single {
-                            AppInformation(
-                                version = Version("test", "1", ""),
-                                versionCode = 1,
-                                id = "ai.passman.test",
-                                environment = Environment.PROD,
-                                debug = false,
-                                userHomeDir = dataDirectory.toString(),
-                            )
-                        }
-                        single { DeviceInfo("test", "test", 1) }
-                        single<CoroutineScopeFacade> {
-                            object : CoroutineScopeFacade {
-                                override val globalScope = CoroutineScope(Dispatchers.Unconfined)
-                                override var transferScope = CoroutineScope(Dispatchers.Unconfined)
-                            }
-                        }
-                    },
-                    loggingModule,
-                )
+        val bindings = Files.readAllLines(prodModule, StandardCharsets.UTF_8)
+            .mapIndexedNotNull { index, line ->
+                "${index + 1}: $line".takeIf {
+                    Regex("""(?m)^\s*single.*""").containsMatchIn(line) &&
+                        Regex("""Logger|bind Logger::class""").containsMatchIn(line)
+                }
             }
+        assertEquals(emptyList(), bindings, "prod variant must not register a Logger")
+    }
 
-            assertEquals(emptyList(), app.koin.getAll<Logger>())
-        } finally {
-            stopKoin()
-            if (previousProfile == null) {
-                System.clearProperty("passman.profile")
-            } else {
-                System.setProperty("passman.profile", previousProfile)
-            }
-            dataDirectory.toFile().deleteRecursively()
-        }
+    @Test
+    fun `debug build variant does register logging sinks`() {
+        // The counterpart: if someone strips the debug bindings, developer builds go silent and
+        // the test above would still pass. Pin both ends.
+        val debugModule = repositoryRoot()
+            .resolve("apps/desk/src/debug/kotlin/ai/passman/di/BuildVariantModule.kt")
+        // Ignore imports — they mention both loggers even if every binding is deleted.
+        val body = Files.readAllLines(debugModule, StandardCharsets.UTF_8)
+            .filterNot { it.trimStart().startsWith("import ") }
+            .joinToString("\n")
+        assertTrue(
+            Regex("""single\s*\{\s*JvmLogger\s*\}\s*bind\s+Logger::class""").containsMatchIn(body),
+            "debug variant should bind the console logger",
+        )
+        assertTrue(
+            Regex("""FileLogger\s*\(""").containsMatchIn(body),
+            "debug variant should bind the file logger",
+        )
     }
 
     /** Walks up from the module directory to the repository root, identified by the included build. */

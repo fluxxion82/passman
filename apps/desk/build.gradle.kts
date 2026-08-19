@@ -9,6 +9,20 @@ plugins {
 group = "ai.passman"
 version = "1.0.3"
 
+// Build variants, in the spirit of Android build types. `src/debug` and `src/prod` each supply
+// `ai.passman.di.buildVariantModule`; exactly one is compiled into the app, so the profile is a
+// compile-time fact rather than something a launcher can get wrong. Debug and prod are fully
+// isolated (separate data dir, prefs node, and credential-store key), which is why this must not
+// depend on how the app was started.
+//
+//   ./gradlew :apps:desk:run                            debug (default)
+//   ./gradlew :apps:desk:packageDmg -Ppassman.variant=prod
+val buildVariant = providers.gradleProperty("passman.variant").getOrElse("debug")
+require(buildVariant == "debug" || buildVariant == "prod") {
+    "passman.variant must be 'debug' or 'prod', got '$buildVariant'"
+}
+kotlin.sourceSets["main"].kotlin.srcDir("src/$buildVariant/kotlin")
+
 // macOS signing & notarization credentials — never commit these.
 //
 // Set in ~/.gradle/gradle.properties (preferred) or as env vars:
@@ -118,14 +132,28 @@ tasks.test {
     useJUnit()
 }
 
-// `./gradlew :apps:desk:run` launches the app with debug profile (separate data dir,
-// separate java.util.prefs node, separate credential-storage master key).
-// Other run/package tasks (runRelease, runDistributable, runReleaseDistributable, packageDmg,
-// packageMsi, packageDeb) do not inherit this arg and default to the prod profile.
-// `afterEvaluate` is required because Compose Desktop registers `run` inside its own
-// afterEvaluate block — at script-eval time the task does not yet exist.
-afterEvaluate {
-    tasks.named<JavaExec>("run") {
-        jvmArgs("-Dpassman.profile=debug")
+// A packaged distribution must never carry the debug variant: it would point real users at the
+// debug data dir and prefs node, and register log sinks that write account names and vault paths
+// to disk. Fail the build rather than produce that artifact.
+listOf(
+    "package",
+    "packageDmg",
+    "packageMsi",
+    "packageDeb",
+    "packageDistributionForCurrentOS",
+    "packageReleaseDmg",
+    "packageReleaseMsi",
+    "packageReleaseDeb",
+    "packageReleaseDistributionForCurrentOS",
+    "createDistributable",
+    "createReleaseDistributable",
+).forEach { taskName ->
+    tasks.matching { it.name == taskName }.configureEach {
+        doFirst {
+            check(buildVariant == "prod") {
+                "$taskName packages the app for distribution and requires -Ppassman.variant=prod " +
+                    "(current variant: $buildVariant)"
+            }
+        }
     }
 }

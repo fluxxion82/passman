@@ -5,6 +5,6 @@ import ai.passman.repo.Platform
 import org.koin.dsl.module
 
 actual val sharedRepoModule = module {
-    single<Platform> { DesktopPlatform() }
+    single<Platform> { DesktopPlatform(get()) }
 }
 

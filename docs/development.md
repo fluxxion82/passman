@@ -12,13 +12,41 @@
 | --- | --- |
 | Build everything | `./gradlew build` |
 | Android app | `./gradlew :apps:droid:assembleDebug` |
-| Desktop app | `./gradlew :apps:desk:run` |
+| Desktop app (debug variant) | `./gradlew :apps:desk:run` |
 | All JVM/Android tests across modules | `./gradlew projectTest` |
 | Android lint across modules | `./gradlew projectLint` |
 | Tests for one module / target | `./gradlew :domain:jvmTest` &nbsp;·&nbsp; `./gradlew :data:repo:testDebugUnitTest` |
 | Single test class | `./gradlew :domain:jvmTest --tests "ai.passman.domain.crypto.DecryptDataTest"` |
 | Single test method | `./gradlew :domain:jvmTest --tests "ai.passman.domain.crypto.DecryptDataTest.someMethod"` |
 | Clean | `./gradlew clean` |
+
+## Build variants
+
+The desktop app has `debug` and `prod` variants, in the spirit of Android build types. `apps/desk/src/debug` and `apps/desk/src/prod` each supply `ai.passman.di.buildVariantModule`, and exactly one is compiled in — selected at configuration time by the `passman.variant` Gradle property, which defaults to `debug`.
+
+```bash
+./gradlew :apps:desk:run                                 # debug
+./gradlew :apps:desk:packageDmg -Ppassman.variant=prod   # prod
+```
+
+The two are **fully isolated** and that isolation is the point — a developer build must never touch a real vault:
+
+| | debug | prod |
+| --- | --- | --- |
+| data directory | `~/passman_debug` | `~/passman` |
+| `java.util.prefs` node | `ai.passman.platform.debug` | `ai.passman.platform` |
+| credential-store master key | `passmanMasterKey_debug` | `passmanMasterKey` |
+| log sinks | console + file | **none** |
+
+Prod registers no logger at all: `FileLogger` creates its output file during construction, and even warning and error messages can contain account names, vault paths, or provider text.
+
+Because the variant is a compile-time fact rather than a runtime flag, there is no way to launch the app into the wrong profile — a plain main-class run configuration cannot miss a JVM argument and silently open the production vault. Packaging tasks (`packageDmg`, `packageMsi`, `packageDeb`, `createDistributable`, …) **fail** unless `-Ppassman.variant=prod`, so a debug build cannot be shipped.
+
+Anything profile-dependent belongs on `DesktopProfile`, which is injected via Koin. Deriving it independently somewhere else is how a debug build ends up naming the production data directory.
+
+Two source-level guards in `apps/desk/src/test/.../LoggingModuleTest.kt` pin this: prod must register no `Logger`, and debug must register both.
+
+Run configurations for the common tasks ship in `.run/`, so the IDE picks them up on clone.
 
 ## Custom Gradle plugins
 

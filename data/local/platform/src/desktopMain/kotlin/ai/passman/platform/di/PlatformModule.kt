@@ -56,7 +56,7 @@ val platformModule = module {
     includes(commonPlatformModule)
 
     single<Settings.Factory> { PreferencesSettings.Factory() }
-    single<EncryptionSettingsFactory> { DesktopEncryptionSettingsFactory() }
+    single<EncryptionSettingsFactory> { DesktopEncryptionSettingsFactory(get()) }
 
     // The pending clear outlives the screen that copied, so it runs on the app-lifetime scope.
     // Dispatchers.Default is fine here: the AWT clipboard is safe to touch off the EDT.
