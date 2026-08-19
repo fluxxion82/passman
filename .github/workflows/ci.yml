@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # k2k is a submodule; the build's configuration phase fails without it.
+          submodules: recursive
+
+      # Verifies gradle-wrapper.jar against the published checksums. A tampered wrapper runs
+      # arbitrary code on every contributor's machine, so it is worth checking on a security tool.
+      - uses: gradle/actions/wrapper-validation@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Tests
+        run: ./gradlew projectTest --no-daemon
+
+      - name: Android app
+        run: ./gradlew :apps:droid:assembleDebug --no-daemon
+
+      - name: Desktop app
+        run: ./gradlew :apps:desk:build --no-daemon
+
+      # Only the selected build variant is compiled, so src/prod is never type-checked by a normal
+      # debug build. Without this step prod bindings can drift and the failure surfaces at packaging.
+      - name: Prod variant compiles
+        run: ./gradlew :apps:desk:compileKotlin -Ppassman.variant=prod --no-daemon
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: '**/build/reports/tests/**'
+          retention-days: 7

@@ -48,6 +48,8 @@ Two source-level guards in `apps/desk/src/test/.../LoggingModuleTest.kt` pin thi
 
 Run configurations for the common tasks ship in `.run/`, so the IDE picks them up on clone.
 
+CI compiles the prod variant on every push and pull request precisely because a normal debug build never type-checks it — see `.github/workflows/ci.yml`.
+
 ## Custom Gradle plugins
 
 The included build at `build-logic/` registers four plugin IDs. Apply them via `plugins { id("…") }` in module build files — the catalog at `gradle/libs.versions.toml` supplies their versions and dependencies.
@@ -65,6 +67,10 @@ The included build at `build-logic/` registers four plugin IDs. Apply them via `
 - **`./gradlew projectLint`** — depends on `lintDebug` in every Android-library module. Each `LibraryPlugin` application wires its module's `lintDebug` into this aggregator, so you don't have to enumerate them.
 
 Both tasks are defined in `build-logic/gradle-plugin/src/main/kotlin/ai/passman/gradle/tasks/`.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request: the full test suite, the Android and desktop builds, and a prod-variant compile. It also validates `gradle-wrapper.jar` against the published checksums — a tampered wrapper executes arbitrary code on every contributor's machine, which is worth checking on a project like this. Test reports upload as an artifact when a run fails.
 
 ## Module map
 
