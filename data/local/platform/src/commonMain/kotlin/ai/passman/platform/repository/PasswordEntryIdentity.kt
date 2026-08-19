@@ -82,17 +82,34 @@ class PasswordEntryIdentity(private val sha256: Sha256Service) {
         Uuid.fromByteArray(sha256.sha256(preimage(entryName, username)).copyOf(UUID_BYTES)).toString()
 
     /**
-     * [entries] with a uuid on every row.
+     * [entries] with a uuid on every row, and [PasswordEntry.createdAt] backfilled where it is
+     * missing.
+     *
+     * The `createdAt` backfill piggybacks on the same idempotent-derivation shape as the uuid one, and
+     * for the same reason: two devices upgrading independently must agree on a value with no
+     * coordination, and `createdAt == 0L` means exactly what `uuid == ""` means — "not yet known for
+     * this row". A pre-upgrade row only ever kept one timestamp, so the honest backfill is
+     * `createdAt := dateCreated`: created and last-edited start out equal, and the first genuine edit
+     * afterwards is what makes them diverge.
+     *
+     * The backfill is guarded by `dateCreated != 0L` so a garbage row — `createdAt == 0L` **and**
+     * `dateCreated == 0L`, which is not a value any writer in this codebase produces but is not
+     * something a hand-edited or corrupted-then-recovered vault can be assumed to avoid — cannot
+     * defeat the fast path below on every single read forever: without the guard, such a row would
+     * keep failing the `none { }` check because `it.copy(createdAt = 0L)` never changes anything,
+     * forcing a full re-map on every call for the lifetime of the vault.
      *
      * Returns the receiver untouched when there is nothing to assign, so a vault that has already
      * been through this does not allocate a second list on every read.
      */
     fun stabilize(entries: List<PasswordEntry>): List<PasswordEntry> =
-        if (entries.none { it.uuid.isEmpty() }) {
+        if (entries.none { it.uuid.isEmpty() || (it.createdAt == 0L && it.dateCreated != 0L) }) {
             entries
         } else {
             entries.map {
-                if (it.uuid.isEmpty()) it.copy(uuid = legacyUuid(it.entryName, it.username)) else it
+                val uuid = if (it.uuid.isEmpty()) legacyUuid(it.entryName, it.username) else it.uuid
+                val createdAt = if (it.createdAt == 0L && it.dateCreated != 0L) it.dateCreated else it.createdAt
+                if (uuid == it.uuid && createdAt == it.createdAt) it else it.copy(uuid = uuid, createdAt = createdAt)
             }
         }
 

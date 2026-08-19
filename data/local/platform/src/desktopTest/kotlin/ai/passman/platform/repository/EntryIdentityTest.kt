@@ -19,6 +19,7 @@ import ai.passman.domain.base.model.Outcome
 import ai.passman.domain.initialization.models.UserState
 import ai.passman.domain.password.AddPassword
 import ai.passman.domain.password.GetPassword
+import ai.passman.domain.password.model.EntryActivity
 import ai.passman.domain.password.model.PasswordEntry
 import ai.passman.domain.user.models.AppUser
 import ai.passman.domain.user.models.Password
@@ -255,6 +256,42 @@ class EntryIdentityTest {
         assertTrue(read.none { it.uuid.isEmpty() }, "a caller must never be handed an entry it cannot address")
     }
 
+    // ------------------------------------------------------ createdAt backfill (obligation 1)
+
+    /**
+     * The other half of `stabilize`'s job: a pre-upgrade row only ever kept one timestamp, so the
+     * honest backfill is `createdAt := dateCreated` — created and last-edited start out equal.
+     */
+    @Test
+    fun `stabilize backfills createdAt from dateCreated for a legacy row`() {
+        val legacy = entry("gmail", id = "1", dateCreated = 12_345L)
+        assertEquals(0L, legacy.createdAt, "fixture precondition: a legacy row has no createdAt")
+
+        val stabilized = identity.stabilize(listOf(legacy))
+
+        assertEquals(12_345L, stabilized.single().createdAt)
+    }
+
+    /**
+     * The guard that keeps a garbage row from defeating the fast path on every read forever.
+     *
+     * `createdAt == 0L` alone is not enough to decide "needs backfilling" — a row with `dateCreated ==
+     * 0L` too has nothing to backfill *from*, and without the `dateCreated != 0L` guard such a row
+     * would fail the `none { }` check on every single call, forcing a full re-map for the lifetime of
+     * the vault. Asserted by reference equality on the returned list: [PasswordEntryIdentity.stabilize]
+     * must return the receiver, not a freshly mapped copy, when there is nothing to do.
+     */
+    @Test
+    fun `a row with a zero dateCreated is left alone and does not defeat the fast path`() {
+        val garbage = entry("gmail", id = "1", dateCreated = 0L).copy(uuid = identity.newUuid())
+        val entries = listOf(garbage)
+
+        val stabilized = identity.stabilize(entries)
+
+        assertTrue(stabilized === entries, "nothing needs backfilling, so stabilize must return the receiver untouched")
+        assertEquals(0L, stabilized.single().createdAt, "there is nothing to backfill from")
+    }
+
     // ------------------------------------------------------------ merge parity
 
     /**
@@ -262,7 +299,11 @@ class EntryIdentityTest {
      *
      * The reference implementation below is a verbatim copy of the merge as it stood before uuids
      * existed. Both sides are run over the same two migrated vaults and compared on every field the
-     * old model had; only `uuid`, which the old model did not have, is excluded.
+     * old model had; `uuid`, `createdAt` and `activity` — none of which the old model had — are
+     * excluded. The real merge backfills `createdAt` (and takes the earlier of the two backfilled
+     * values, per `minNonZero`) as a byproduct of stabilizing every row it touches, so leaving it in
+     * the comparison would fail this test for a schema-driven field neither vault used to carry, not
+     * for a behaviour change.
      *
      * The fixture is built so a difference could actually show: a name present on both sides with a
      * newer `dateCreated` incoming (conflict resolution runs), a name only on the local side, and a
@@ -287,7 +328,7 @@ class EntryIdentityTest {
         val merged = repository().getPasswordEntries()
         assertEquals(
             legacyNameKeyedMerge(existing, incoming),
-            merged.map { it.copy(uuid = "") },
+            merged.map { it.copy(uuid = "", createdAt = 0, activity = emptyList()) },
             "the uuid-keyed merge must be indistinguishable from the name-keyed one on migrated vaults",
         )
         // And the fixture really did exercise all three cases.
@@ -410,6 +451,313 @@ class EntryIdentityTest {
 
         assertEquals(2, twins.size, "a read never drops a row")
         assertEquals(twins[0].uuid, twins[1].uuid, "there is nothing left to tell them apart")
+    }
+
+    // ------------------------------------------------- activity & createdAt merge
+
+    /**
+     * Obligation 4, direction one: the incoming row wins on `dateCreated`. Both sides carry a
+     * disjoint activity record; the union must keep all three, not only the winner's own list.
+     */
+    @Test
+    fun `a merge unions activity from both sides when the incoming row wins on dateCreated`() = runBlocking<Unit> {
+        val local = entry("gmail", id = "1", dateCreated = 100L).copy(
+            createdAt = 100L,
+            activity = listOf(EntryActivity(100L, EntryActivity.KIND_CREATED)),
+        )
+        legacyVault(listOf(local))
+
+        val incoming = entry("gmail", id = "1", dateCreated = 200L, password = "rotated").copy(
+            createdAt = 50L,
+            activity = listOf(EntryActivity(50L, "peer-only"), EntryActivity(200L, EntryActivity.KIND_EDITED)),
+        )
+        val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
+            .pullPasswordDatabase("peer-host")
+        assertIs<Outcome.Success<Unit>>(outcome)
+
+        val merged = repository().getPasswordEntries().single { it.entryName == "gmail" }
+        assertEquals("rotated", merged.password, "fixture precondition: the incoming row wins the scalar comparison")
+        assertEquals(
+            listOf(
+                EntryActivity(50L, "peer-only"),
+                EntryActivity(100L, EntryActivity.KIND_CREATED),
+                EntryActivity(200L, EntryActivity.KIND_EDITED),
+            ),
+            merged.activity,
+            "both sides' disjoint records must survive, not just the winner's own list",
+        )
+    }
+
+    /**
+     * Obligation 4, direction two — the one that fails a winner-arm-only implementation. The
+     * *local* row wins on `dateCreated` here, so a merge that only unions inside the "incoming wins"
+     * branch would drop the incoming row's disjoint record and never look at it again.
+     */
+    @Test
+    fun `a merge unions activity from both sides when the existing row wins on dateCreated`() = runBlocking<Unit> {
+        val local = entry("gmail", id = "1", dateCreated = 200L, password = "kept").copy(
+            createdAt = 200L,
+            activity = listOf(EntryActivity(100L, EntryActivity.KIND_CREATED), EntryActivity(200L, EntryActivity.KIND_EDITED)),
+        )
+        legacyVault(listOf(local))
+
+        val incoming = entry("gmail", id = "1", dateCreated = 100L).copy(
+            createdAt = 50L,
+            activity = listOf(EntryActivity(50L, "peer-only")),
+        )
+        val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
+            .pullPasswordDatabase("peer-host")
+        assertIs<Outcome.Success<Unit>>(outcome)
+
+        val merged = repository().getPasswordEntries().single { it.entryName == "gmail" }
+        assertEquals("kept", merged.password, "fixture precondition: the existing row wins the scalar comparison")
+        assertEquals(
+            listOf(
+                EntryActivity(50L, "peer-only"),
+                EntryActivity(100L, EntryActivity.KIND_CREATED),
+                EntryActivity(200L, EntryActivity.KIND_EDITED),
+            ),
+            merged.activity,
+            "the losing side's disjoint record must still be unioned in, not discarded",
+        )
+    }
+
+    /** Obligation 5. */
+    @Test
+    fun `merge dedupes an activity record both sides already hold`() = runBlocking<Unit> {
+        val shared = EntryActivity(100L, EntryActivity.KIND_CREATED)
+        val local = entry("gmail", id = "1", dateCreated = 100L).copy(createdAt = 100L, activity = listOf(shared))
+        legacyVault(listOf(local))
+
+        val incoming = entry("gmail", id = "1", dateCreated = 200L).copy(
+            createdAt = 100L,
+            activity = listOf(shared, EntryActivity(200L, EntryActivity.KIND_EDITED)),
+        )
+        val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
+            .pullPasswordDatabase("peer-host")
+        assertIs<Outcome.Success<Unit>>(outcome)
+
+        val merged = repository().getPasswordEntries().single { it.entryName == "gmail" }
+        assertEquals(
+            listOf(shared, EntryActivity(200L, EntryActivity.KIND_EDITED)),
+            merged.activity,
+            "a record both sides already hold must appear once, not twice",
+        )
+    }
+
+    /** Obligation 6. */
+    @Test
+    fun `merge takes the earlier createdAt even when the other side wins on dateCreated`() = runBlocking<Unit> {
+        val local = entry("gmail", id = "1", dateCreated = 500L).copy(createdAt = 500L)
+        legacyVault(listOf(local))
+
+        val incoming = entry("gmail", id = "1", dateCreated = 100L).copy(createdAt = 10L)
+        val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
+            .pullPasswordDatabase("peer-host")
+        assertIs<Outcome.Success<Unit>>(outcome)
+
+        val merged = repository().getPasswordEntries().single { it.entryName == "gmail" }
+        assertEquals(500L, merged.dateCreated, "fixture precondition: the existing row wins on dateCreated")
+        assertEquals(10L, merged.createdAt, "the earlier createdAt must be kept even though its row lost the scalar comparison")
+    }
+
+    /**
+     * Obligation 6, the other direction. Every other `createdAt` fixture in this file happens to give
+     * the *winning* row the smaller-or-equal `createdAt`, which leaves `minNonZero(current.createdAt,
+     * entry.createdAt)` in the "incoming wins" arm indistinguishable from a bare `entry.createdAt`: the
+     * winner's own value already is the minimum, so dropping the `minNonZero` call there would still
+     * pass. Here the *incoming* row wins on `dateCreated` but carries the *later* `createdAt`, so only
+     * an actual `min()` produces the local row's earlier value.
+     */
+    @Test
+    fun `merge takes the local row's earlier createdAt even when the incoming row wins on dateCreated`() = runBlocking<Unit> {
+        val local = entry("gmail", id = "1", dateCreated = 100L).copy(createdAt = 10L)
+        legacyVault(listOf(local))
+
+        val incoming = entry("gmail", id = "1", dateCreated = 200L, password = "rotated").copy(createdAt = 999L)
+        val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
+            .pullPasswordDatabase("peer-host")
+        assertIs<Outcome.Success<Unit>>(outcome)
+
+        val merged = repository().getPasswordEntries().single { it.entryName == "gmail" }
+        assertEquals(200L, merged.dateCreated, "fixture precondition: the incoming row wins on dateCreated")
+        assertEquals(10L, merged.createdAt, "the local row's earlier createdAt must survive even though its row lost the scalar comparison")
+    }
+
+    /** Obligation 3, merge half — the decode/round-trip half is pinned in `PasswordEntryCompatTest`. */
+    @Test
+    fun `an unrecognised activity kind survives a merge and is re-encoded verbatim`() = runBlocking<Unit> {
+        val exotic = EntryActivity(150L, "totp-viewed", "phone-3")
+        val local = entry("gmail", id = "1", dateCreated = 100L).copy(
+            createdAt = 100L,
+            activity = listOf(EntryActivity(100L, EntryActivity.KIND_CREATED)),
+        )
+        legacyVault(listOf(local))
+
+        val incoming = entry("gmail", id = "1", dateCreated = 200L).copy(createdAt = 100L, activity = listOf(exotic))
+        val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
+            .pullPasswordDatabase("peer-host")
+        assertIs<Outcome.Success<Unit>>(outcome)
+
+        val merged = repository().getPasswordEntries().single { it.entryName == "gmail" }
+        assertTrue(merged.activity.contains(exotic), "an unrecognised kind must survive the merge unchanged")
+        assertEquals(
+            exotic,
+            storedEntries().single { it.entryName == "gmail" }.activity.first { it.at == 150L },
+            "and must be re-encoded on disk verbatim, not coerced to a fallback value",
+        )
+    }
+
+    /** Obligation 7, merge half — the append half is below. */
+    @Test
+    fun `cap holds after a merge, keeping the newest`() = runBlocking<Unit> {
+        val local = entry("gmail", id = "1", dateCreated = 14L).copy(
+            activity = (0L..14L).map { EntryActivity(it, EntryActivity.KIND_EDITED) },
+        )
+        legacyVault(listOf(local))
+
+        val incoming = entry("gmail", id = "1", dateCreated = 29L).copy(
+            activity = (15L..29L).map { EntryActivity(it, EntryActivity.KIND_EDITED) },
+        )
+        val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
+            .pullPasswordDatabase("peer-host")
+        assertIs<Outcome.Success<Unit>>(outcome)
+
+        val merged = repository().getPasswordEntries().single { it.entryName == "gmail" }
+        assertEquals(20, merged.activity.size, "capped at MAX_ACTIVITY")
+        assertEquals((10L..29L).toList(), merged.activity.map { it.at }, "the newest 20 survive, oldest dropped")
+    }
+
+    /** Obligation 7, append half. */
+    @Test
+    fun `cap holds after an append, keeping the newest`() = runBlocking<Unit> {
+        val seeded = entry("gmail", id = "1", dateCreated = 19L).copy(
+            activity = (0L..19L).map { EntryActivity(it, EntryActivity.KIND_EDITED) },
+        )
+        legacyVault(listOf(seeded))
+        val repository = repository()
+        val before = repository.getPasswordEntries().single()
+        assertEquals(20, before.activity.size, "fixture precondition: already at the cap")
+        assertEquals(0L, before.activity.first().at, "fixture precondition: the oldest record is at=0")
+
+        repository.updatePasswordEntry(before.copy(password = "rotated"))
+
+        val after = repository.getPasswordEntries().single()
+        assertEquals(20, after.activity.size, "still capped after the append")
+        assertTrue(after.activity.none { it.at == 0L }, "the oldest record must be dropped to make room")
+        assertEquals(after.dateCreated, after.activity.last().at, "the newest record is the one just appended")
+    }
+
+    /**
+     * Obligation 10. `entry.copy(...)` in `updatePasswordEntry` must source `createdAt` and `activity`
+     * from the *stored* row, not from whatever the caller happened to be holding — a caller that read
+     * the entry before another device's merge landed would otherwise roll the history back.
+     */
+    @Test
+    fun `update carries createdAt and activity from the stored entry, not a stale caller copy`() = runBlocking<Unit> {
+        settledVault("gmail")
+        val repository = repository()
+        val stored = repository.getPasswordEntries().single()
+        val stale = stored.copy(
+            password = "rotated",
+            createdAt = 1L,
+            activity = listOf(EntryActivity(1L, "phantom")),
+        )
+
+        repository.updatePasswordEntry(stale)
+
+        val after = repository.getPasswordEntries().single()
+        assertEquals(stored.createdAt, after.createdAt, "createdAt must come from the stored row, not the caller's stale copy")
+        assertTrue(after.activity.none { it.kind == "phantom" }, "the caller's foreign activity history must not overwrite the real one")
+        assertEquals(stored.activity.size + 1, after.activity.size, "exactly one record is appended")
+        assertEquals(after.dateCreated, after.activity.last().at, "the appended record's at equals the new dateCreated")
+    }
+
+    /**
+     * Obligation 8, and the test that pins the total-order sort. With `sortedBy { it.at }` (stable,
+     * so ties keep concatenation order) this exact fixture drops the *other* record at the tied
+     * timestamp instead, so asserting the total-order outcome fails under that simplification.
+     */
+    @Test
+    fun `merging twice equals merging once, including at the cap boundary with a tied timestamp`() = runBlocking<Unit> {
+        val local = entry("gmail", id = "1", dateCreated = 20L, password = "local").copy(
+            createdAt = 5L,
+            activity = listOf(EntryActivity(1L, "z")) + (2L..20L).map { EntryActivity(it, EntryActivity.KIND_EDITED) },
+        )
+        legacyVault(listOf(local))
+
+        val peer = entry("gmail", id = "1", dateCreated = 25L, password = "peer").copy(
+            createdAt = 3L,
+            activity = listOf(EntryActivity(1L, "a")),
+        )
+        val peerBytes = Json.encodeToString(listOf(peer)).encodeToByteArray()
+
+        val first = repository(transferService = FakeTransfer(peerBytes)).pullPasswordDatabase("peer-host")
+        assertIs<Outcome.Success<Unit>>(first)
+        val afterFirst = repository().getPasswordEntries().single { it.entryName == "gmail" }
+
+        assertEquals(20, afterFirst.activity.size, "capped at MAX_ACTIVITY")
+        assertEquals(EntryActivity(1L, "z"), afterFirst.activity.first(), "the total order keeps 'z' over the tied 'a'")
+        assertTrue(afterFirst.activity.none { it.at == 1L && it.kind == "a" }, "the tied loser must be dropped")
+        assertEquals(3L, afterFirst.createdAt, "the earlier createdAt wins even though its row also won dateCreated")
+
+        val second = repository(transferService = FakeTransfer(peerBytes)).pullPasswordDatabase("peer-host")
+        assertIs<Outcome.Success<Unit>>(second)
+        val afterSecond = repository().getPasswordEntries().single { it.entryName == "gmail" }
+
+        assertEquals(afterFirst.activity, afterSecond.activity, "merging the same peer payload again must not change the result")
+        assertEquals(afterFirst.createdAt, afterSecond.createdAt, "nor the createdAt")
+    }
+
+    /**
+     * Obligation 9. Two independent vaults, each merging the other's row in — vault A takes X local
+     * and Y as the incoming peer, vault B takes Y local and X as the incoming peer. The tied record at
+     * `at=60` is what makes this pin the total-order sort rather than `sortedBy { it.at }`: a stable
+     * sort keeps a tied pair in concatenation order, which is reversed between the two directions, so
+     * the two vaults would disagree on which of the tied pair survives.
+     */
+    @Test
+    fun `merge(a,b) and merge(b,a) agree on activity and createdAt`() = runBlocking<Unit> {
+        val x = entry("gmail", id = "1", dateCreated = 100L, password = "x").copy(
+            createdAt = 10L,
+            activity = listOf(EntryActivity(10L, "created"), EntryActivity(60L, "m")),
+        )
+        val y = entry("gmail", id = "1", dateCreated = 200L, password = "y").copy(
+            createdAt = 5L,
+            activity = listOf(EntryActivity(5L, "seeded"), EntryActivity(60L, "q"), EntryActivity(150L, "edited")),
+        )
+
+        // Vault A (the class's shared storage/root): X is local, Y arrives as the peer.
+        legacyVault(listOf(x))
+        val outcomeA = repository(transferService = FakeTransfer(Json.encodeToString(listOf(y)).encodeToByteArray()))
+            .pullPasswordDatabase("peer-host")
+        assertIs<Outcome.Success<Unit>>(outcomeA)
+        val afterA = repository().getPasswordEntries().single { it.entryName == "gmail" }
+
+        // Vault B: an entirely separate storage root, with Y local and X arriving as the peer.
+        val otherRoot = Files.createTempDirectory("entry-identity-commute").toFile()
+        try {
+            val otherStorage = JvmPasswordDatabaseStorage(
+                object : Platform() {
+                    override fun getLocalPath(): String = otherRoot.absolutePath
+                },
+            )
+            otherStorage.create(
+                user,
+                JvmCryptoService().encryptBytes(Json.encodeToString(listOf(y)).encodeToByteArray(), rsaPublic),
+            )
+            val outcomeB = repository(
+                storage = otherStorage,
+                transferService = FakeTransfer(Json.encodeToString(listOf(x)).encodeToByteArray()),
+            ).pullPasswordDatabase("peer-host")
+            assertIs<Outcome.Success<Unit>>(outcomeB)
+            val afterB = repository(storage = otherStorage).getPasswordEntries().single { it.entryName == "gmail" }
+
+            assertEquals(afterA.activity, afterB.activity, "merge(a,b) and merge(b,a) must agree on activity")
+            assertEquals(afterA.createdAt, afterB.createdAt, "and on createdAt")
+        } finally {
+            otherRoot.deleteRecursively()
+        }
     }
 
     // ------------------------------------------------------- addressing a row

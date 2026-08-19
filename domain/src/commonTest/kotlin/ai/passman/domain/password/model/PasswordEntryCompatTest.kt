@@ -3,11 +3,13 @@ package ai.passman.domain.password.model
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 
 /**
  * The vault decoder tolerates unknown keys, so schema growth is safe forward; these tests pin the
- * backward side — rows written before [PasswordEntry.totpSeed] and [PasswordEntry.customFields]
- * existed must decode to the empty defaults, and the new fields must survive a round trip.
+ * backward side — rows written before [PasswordEntry.totpSeed], [PasswordEntry.customFields],
+ * [PasswordEntry.createdAt] and [PasswordEntry.activity] existed must decode to the empty defaults,
+ * and the new fields must survive a round trip.
  */
 class PasswordEntryCompatTest {
     private val json = Json { ignoreUnknownKeys = true }
@@ -19,6 +21,19 @@ class PasswordEntryCompatTest {
         )
         assertEquals("", entry.totpSeed)
         assertEquals(emptyList(), entry.customFields)
+    }
+
+    /**
+     * Obligation 1 (decode half; the backfill half — deriving `createdAt` from `dateCreated` — is
+     * `PasswordEntryIdentity.stabilize`'s job and is pinned in `EntryIdentityTest`).
+     */
+    @Test
+    fun `a legacy row decodes with a zero createdAt and no activity`() {
+        val entry = json.decodeFromString<PasswordEntry>(
+            """{"id":"1","entryName":"gmail","username":"mia","password":"pw","website":"","notes":"","dateCreated":900,"uuid":"u-1"}""",
+        )
+        assertEquals(0L, entry.createdAt)
+        assertEquals(emptyList(), entry.activity)
     }
 
     @Test
@@ -39,6 +54,79 @@ class PasswordEntryCompatTest {
             ),
         )
         assertEquals(entry, json.decodeFromString(json.encodeToString(entry)))
+    }
+
+    /** Obligation 2. */
+    @Test
+    fun `createdAt and activity survive a round trip`() {
+        val entry = PasswordEntry(
+            id = "1",
+            entryName = "gmail",
+            username = "mia",
+            password = "pw",
+            website = "https://mail.google.com",
+            notes = "",
+            dateCreated = 900,
+            uuid = "u-1",
+            createdAt = 500,
+            activity = listOf(
+                EntryActivity(at = 500, kind = EntryActivity.KIND_CREATED),
+                EntryActivity(at = 900, kind = EntryActivity.KIND_EDITED, device = "desktop-1"),
+            ),
+        )
+        val decoded = json.decodeFromString<PasswordEntry>(json.encodeToString(entry))
+        assertEquals(entry, decoded)
+        assertEquals(500L, decoded.createdAt)
+        assertEquals(
+            listOf(EntryActivity(500, EntryActivity.KIND_CREATED), EntryActivity(900, EntryActivity.KIND_EDITED, "desktop-1")),
+            decoded.activity,
+        )
+    }
+
+    /**
+     * Obligation 3 (decode/round-trip half; "survives a merge" is pinned where the merge lives, in
+     * `EntryIdentityTest`). This is the test that pins the `kind: String` decision at the model level:
+     * an enum here would throw on the unrecognised value instead of round-tripping it.
+     */
+    @Test
+    fun `an entry activity with an unrecognised kind decodes and re-encodes verbatim`() {
+        val wireJson =
+            """{"id":"1","entryName":"gmail","username":"mia","password":"pw","website":"","notes":"",""" +
+                """"dateCreated":900,"uuid":"u-1","createdAt":500,"activity":[{"at":700,"kind":"totp-viewed"}]}"""
+
+        val entry = json.decodeFromString<PasswordEntry>(wireJson)
+
+        assertEquals("totp-viewed", entry.activity.single().kind, "an unknown kind must decode, not throw")
+        assertEquals(
+            wireJson,
+            json.encodeToString(entry),
+            "the unrecognised kind must round-trip byte-for-byte, not collapse to a fallback value",
+        )
+    }
+
+    /**
+     * Obligation 12. `encodeDefaults` is off (`VaultJson.kt`'s production `Json` instance, mirrored
+     * here), so a field left at its default must be entirely absent from the JSON — not written as
+     * `"createdAt":0` or `"activity":[]` — or every existing vault would grow the moment it is
+     * re-encoded by a build that knows these fields.
+     */
+    @Test
+    fun `an empty activity list and a zero createdAt are absent from the encoded json`() {
+        val entry = PasswordEntry(
+            id = "1",
+            entryName = "gmail",
+            username = "mia",
+            password = "pw",
+            website = "",
+            notes = "",
+            dateCreated = 900,
+            uuid = "u-1",
+        )
+
+        val encoded = json.encodeToString(entry)
+
+        assertFalse(encoded.contains("createdAt"), "createdAt at its default must not be written: $encoded")
+        assertFalse(encoded.contains("activity"), "an empty activity list must not be written: $encoded")
     }
 
     @Test

@@ -78,16 +78,33 @@ internal class VaultReconciler(
                                 // on two migrated vaults the uuid is a relabelling of entryName, so
                                 // this is the same merge it has always been, and it stops being the
                                 // same one only for entries created after the upgrade.
+                                //
+                                // activity/createdAt are unioned in *both* arms below, not only when
+                                // the staged row wins on dateCreated - see mergeActivity's KDoc and
+                                // LocalPasswordRepository.mergePasswordEntries's KDoc for why a
+                                // winner-arm-only union is broken: it drops the losing side's activity
+                                // and createdAt permanently instead of converging on the next sync.
                                 val byUuid = curEntries.associateBy { it.uuid }.toMutableMap()
                                 for (pass in newEntries) {
                                     val existingEntry = byUuid[pass.uuid]
-                                    if (existingEntry == null || pass.dateCreated > existingEntry.dateCreated) {
-                                        byUuid[pass.uuid] = pass
+                                    byUuid[pass.uuid] = when {
+                                        existingEntry == null -> pass
+                                        pass.dateCreated > existingEntry.dateCreated -> pass.copy(
+                                            activity = mergeActivity(existingEntry.activity, pass.activity),
+                                            createdAt = minNonZero(existingEntry.createdAt, pass.createdAt),
+                                        )
+                                        else -> existingEntry.copy(
+                                            activity = mergeActivity(existingEntry.activity, pass.activity),
+                                            createdAt = minNonZero(existingEntry.createdAt, pass.createdAt),
+                                        )
                                     }
                                 }
                                 byUuid.values.sortedBy { it.entryName.lowercase() }
                                     .mapIndexed { index, entry -> entry.copy(id = (index + 1).toString()) }
                             } else {
+                                // Overwrite: the staged rows verbatim, local activity and all. That is
+                                // inherent to what Overwrite means - "take theirs" - not a gap this
+                                // schema step missed; there is no local row left to union against.
                                 entryIdentity.stabilize(VaultJson.decodeFromString<List<PasswordEntry>>(newJsonString))
                             }
 

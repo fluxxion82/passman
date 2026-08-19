@@ -27,6 +27,7 @@ import ai.passman.domain.connectivity.repository.TrustedDevicesRepository
 import ai.passman.domain.initialization.models.UserState
 import ai.passman.domain.keystore.model.KeystoreEvent
 import ai.passman.domain.keystore.persistence.KeystoreEventPersistence
+import ai.passman.domain.password.model.EntryActivity
 import ai.passman.domain.password.model.PasswordEntry
 import ai.passman.domain.password.model.PasswordEvent
 import ai.passman.domain.password.persistence.PasswordEventPersistence
@@ -200,6 +201,85 @@ class TransferVaultFormatTest {
         assertEquals("rotated", merged.first { it.entryName == "zoom" }.password, "the newer copy still wins")
         assertTrue(merged.none { it.uuid.isEmpty() }, "a published row with no identity cannot be addressed")
         assertEquals(merged.size, merged.map { it.uuid }.toSet().size, "and no two rows may share one")
+    }
+
+    /**
+     * Obligation 11's second half: this merge site must apply the same both-arms union rule as
+     * `LocalPasswordRepository.mergePasswordEntries` — see that method's KDoc for why a
+     * winner-arm-only implementation is broken. The local row wins on `dateCreated` here, which is
+     * deliberately the harder direction: a merge that only unions when the staged row wins would drop
+     * the staged row's disjoint activity record and never consult its earlier `createdAt`.
+     */
+    @Test
+    fun `a reconciled merge unions activity from both sides even when the local row wins on dateCreated`() = runBlocking<Unit> {
+        val local = entry("gmail", dateCreated = 2_000L).copy(
+            createdAt = 2_000L,
+            activity = listOf(EntryActivity(1_000L, EntryActivity.KIND_CREATED), EntryActivity(2_000L, EntryActivity.KIND_EDITED)),
+        )
+        storage.create(user, vaultCipher.encryptVault(json(local), sessionKey))
+
+        val staged = entry("gmail", dateCreated = 500L).copy(
+            createdAt = 100L,
+            activity = listOf(EntryActivity(100L, "peer-only")),
+        )
+        stage(vaultCipher.encryptVault(json(staged), sessionKey))
+
+        assertIs<Outcome.Success<Unit>>(repository().executeReconcileAction(ReconcileAction.Merge))
+
+        val merged = storedEntries().single { it.entryName == "gmail" }
+        assertEquals(2_000L, merged.dateCreated, "fixture precondition: the local row wins on dateCreated")
+        assertEquals(
+            listOf(
+                EntryActivity(100L, "peer-only"),
+                EntryActivity(1_000L, EntryActivity.KIND_CREATED),
+                EntryActivity(2_000L, EntryActivity.KIND_EDITED),
+            ),
+            merged.activity,
+            "the staged row's disjoint activity must be unioned in even though it lost the scalar comparison",
+        )
+        assertEquals(100L, merged.createdAt, "the earlier createdAt must be taken even though its row lost dateCreated")
+    }
+
+    /**
+     * Obligation 6's missing direction at this merge site. Every other `createdAt` fixture here gives
+     * the *winning* row the smaller-or-equal `createdAt`, so `minNonZero(existingEntry.createdAt,
+     * pass.createdAt)` in the "staged row wins" arm is indistinguishable from a bare `pass.createdAt` —
+     * the winner's own value is already the minimum. Here the staged row wins on `dateCreated` but
+     * carries the *later* `createdAt`, so only an actual `min()` produces the local row's earlier value.
+     */
+    @Test
+    fun `a reconciled merge takes the local row's earlier createdAt even when the staged row wins on dateCreated`() = runBlocking<Unit> {
+        val local = entry("gmail", dateCreated = 100L).copy(createdAt = 10L)
+        storage.create(user, vaultCipher.encryptVault(json(local), sessionKey))
+
+        val staged = entry("gmail", dateCreated = 200L, password = "rotated").copy(createdAt = 999L)
+        stage(vaultCipher.encryptVault(json(staged), sessionKey))
+
+        assertIs<Outcome.Success<Unit>>(repository().executeReconcileAction(ReconcileAction.Merge))
+
+        val merged = storedEntries().single { it.entryName == "gmail" }
+        assertEquals(200L, merged.dateCreated, "fixture precondition: the staged row wins on dateCreated")
+        assertEquals(10L, merged.createdAt, "the local row's earlier createdAt must survive even though its row lost dateCreated")
+    }
+
+    /** Obligation 7's merge half, pinned at this site too. */
+    @Test
+    fun `cap holds after a reconciled merge, keeping the newest`() = runBlocking<Unit> {
+        val local = entry("gmail", dateCreated = 19L).copy(
+            activity = (0L..19L).map { EntryActivity(it, EntryActivity.KIND_EDITED) },
+        )
+        storage.create(user, vaultCipher.encryptVault(json(local), sessionKey))
+
+        val staged = entry("gmail", dateCreated = 20L).copy(
+            activity = listOf(EntryActivity(20L, EntryActivity.KIND_EDITED)),
+        )
+        stage(vaultCipher.encryptVault(json(staged), sessionKey))
+
+        assertIs<Outcome.Success<Unit>>(repository().executeReconcileAction(ReconcileAction.Merge))
+
+        val merged = storedEntries().single { it.entryName == "gmail" }
+        assertEquals(20, merged.activity.size, "capped at MAX_ACTIVITY")
+        assertEquals((1L..20L).toList(), merged.activity.map { it.at }, "the newest 20 survive, oldest dropped")
     }
 
     /**

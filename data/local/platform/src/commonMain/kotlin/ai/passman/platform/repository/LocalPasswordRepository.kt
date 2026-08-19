@@ -15,6 +15,7 @@ import ai.passman.domain.base.CoroutinesContextFacade
 import ai.passman.domain.base.model.Outcome
 import ai.passman.domain.password.AddPassword
 import ai.passman.domain.password.exception.PasswordFailure
+import ai.passman.domain.password.model.EntryActivity
 import ai.passman.domain.password.model.PasswordEntry
 import ai.passman.domain.password.repository.PasswordRepository
 import ai.passman.domain.settings.exception.TransferFailure
@@ -135,11 +136,16 @@ class LocalPasswordRepository(
                     // vault (a sync can carry anything), and this lambda runs outside every
                     // runCatching — a bad ordinal must cost nothing, not fail the add.
                     val currentIndex = entries.maxOfOrNull { it.id.toIntOrNull() ?: 0 } ?: 0
+                    // One timestamp for dateCreated, createdAt and the sole activity record: the merge
+                    // rule that keeps the newest activity `at` equal to `dateCreated` (see
+                    // updatePasswordEntry) starts being true from the very first write, not from the
+                    // first edit.
+                    val now = Clock.System.now().toEpochMilliseconds()
                     entries.add(
                         PasswordEntry(
                             uuid = uuid,
                             id = (currentIndex + 1).toString(),
-                            dateCreated = Clock.System.now().toEpochMilliseconds(),
+                            dateCreated = now,
                             entryName = entry.entryName,
                             password = entry.password,
                             website = entry.website,
@@ -147,6 +153,8 @@ class LocalPasswordRepository(
                             notes = entry.notes,
                             totpSeed = entry.totpSeed,
                             customFields = entry.customFields,
+                            createdAt = now,
+                            activity = listOf(EntryActivity(now, EntryActivity.KIND_CREATED)),
                         ),
                     )
                     // Numeric, not lexicographic: as strings, ordinal 10 files between 1 and 2. The
@@ -250,11 +258,23 @@ class LocalPasswordRepository(
                     } else {
                         // The ordinal comes from the vault, not from the caller: `entry` was read
                         // before this attempt and may be carrying a number the vault has since
-                        // handed to somebody else.
+                        // handed to somebody else. `createdAt` and `activity` join that list for the
+                        // same reason: a caller that read the entry before another device's merge
+                        // landed would otherwise roll the history back to whatever it had on hand,
+                        // discarding activity records a sync already delivered to this vault.
+                        val now = Clock.System.now().toEpochMilliseconds()
                         entry.copy(
                             uuid = existing.uuid,
                             id = existing.id,
-                            dateCreated = Clock.System.now().toEpochMilliseconds(),
+                            dateCreated = now,
+                            createdAt = existing.createdAt,
+                            // The new record's `at` is this same `now`, so this edit path guarantees the
+                            // newest activity entry equals `dateCreated` immediately after *this* write —
+                            // not a vault-wide invariant: a merged-in peer record can carry a
+                            // skewed-future `at` that outranks it later. mergeActivity also caps at
+                            // MAX_ACTIVITY, which is what bounds this append the same way it bounds a
+                            // merge's union.
+                            activity = mergeActivity(existing.activity, listOf(EntryActivity(now, EntryActivity.KIND_EDITED))),
                         )
                     }
                 }
@@ -412,6 +432,20 @@ class LocalPasswordRepository(
      * that has not upgraded, in which case its rows have no uuid at all; deriving it on this side
      * reaches the same values the peer would have, which is the property the whole scheme rests on.
      * The conflict rule itself is untouched: newer [PasswordEntry.dateCreated] wins.
+     *
+     * ## `activity` and `createdAt` are unioned in *both* arms of that decision, not just the winning
+     * one
+     *
+     * The obvious-looking implementation only calls [mergeActivity] when the incoming row replaces the
+     * current one — and it is wrong. When the current row wins instead, the incoming side's unique
+     * activity records would be silently dropped and its earlier `createdAt` would never reach
+     * [minNonZero]. Each device would then keep its own separate history: the mirror merge running on
+     * the peer unions in the *other* direction, so the two vaults' activity lists never converge, and
+     * the next strictly-newer edit drags one side's list back across the sync — history flip-flops
+     * between syncs instead of settling. [minNonZero] would be unreachable in exactly the cases it
+     * exists for. So both branches below write back the union, and only `current == null` (no local row
+     * to union against) takes the incoming row as-is. See [mergeActivity]'s KDoc for why the union
+     * itself has to sort on the full `(at, kind, device)` tuple rather than on `at` alone.
      */
     private fun mergePasswordEntries(
         existing: List<PasswordEntry>,
@@ -420,8 +454,16 @@ class LocalPasswordRepository(
         val byUuid = entryIdentity.stabilize(existing).associateBy { it.uuid }.toMutableMap()
         for (entry in entryIdentity.stabilize(incoming)) {
             val current = byUuid[entry.uuid]
-            if (current == null || entry.dateCreated > current.dateCreated) {
-                byUuid[entry.uuid] = entry
+            byUuid[entry.uuid] = when {
+                current == null -> entry
+                entry.dateCreated > current.dateCreated -> entry.copy(
+                    activity = mergeActivity(current.activity, entry.activity),
+                    createdAt = minNonZero(current.createdAt, entry.createdAt),
+                )
+                else -> current.copy(
+                    activity = mergeActivity(current.activity, entry.activity),
+                    createdAt = minNonZero(current.createdAt, entry.createdAt),
+                )
             }
         }
         return byUuid.values
