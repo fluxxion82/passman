@@ -148,10 +148,15 @@ fun PassMgmtContent(
                         .padding(start = 10.dp, top = 20.dp, bottom = 20.dp, end = 10.dp),
                 ) {
                     Text(
-                        // Weighted with fill = false so a very long name yields the space the date
-                        // needs instead of measuring first and clipping it off the row entirely.
+                        // The only weighted child, and there is deliberately no Spacer beside it.
+                        // A Row measures its unweighted children first, so the date always gets its
+                        // full width and sits flush against the row's end, and the name takes
+                        // whatever is left and ellipsizes. An earlier version had this weighted
+                        // alongside a `Spacer(weight(1f))`: two weights split the leftover space
+                        // evenly, which parked the date at "name width plus half the remainder" —
+                        // a different x for every row, and never the right edge.
                         modifier = Modifier
-                            .weight(1f, fill = false)
+                            .weight(1f)
                             .align(Alignment.CenterVertically),
                         text = pass.entryName,
                         color = MaterialTheme.colorScheme.onSurface,
@@ -160,16 +165,16 @@ fun PassMgmtContent(
                         overflow = TextOverflow.Ellipsis,
                     )
 
-                    Spacer(modifier = Modifier.weight(1f))
-
                     Text(
                         modifier = Modifier
+                            .padding(start = 8.dp)
                             .align(Alignment.Bottom),
-                        // Labelled, not swapped for createdAt: this column has always shown
-                        // dateCreated, which despite its name is last-edited (PasswordEntry KDoc),
-                        // and users already read it that way. A bare date is ambiguous either way,
-                        // so the fix is the label, not a silent change of which timestamp shows here.
-                        text = "Edited ${formatDate(pass.dateCreated)}",
+                        // dateCreated, which despite its name is the last-edited stamp
+                        // (PasswordEntry's KDoc) — deliberately not swapped for createdAt, since
+                        // this column has always shown this value and users read it that way. It
+                        // stays a bare date by owner preference: the details screen spells out
+                        // created vs last edited, so the list does not have to carry the word.
+                        text = formatDate(pass.dateCreated),
                         color = MaterialTheme.colorScheme.onSurface,
                         textAlign = TextAlign.End,
                         maxLines = 1,
