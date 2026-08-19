@@ -9,6 +9,7 @@ import ai.passman.design.core.utils.colorizeString
 import ai.passman.design.passmanColors
 import ai.passman.domain.password.GenerateTotpCode
 import ai.passman.domain.password.model.CustomField
+import ai.passman.domain.password.model.EntryActivity
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -56,6 +57,9 @@ fun PassDetailsContent(
     totpSeed: String,
     totpCode: GenerateTotpCode.TotpCode?,
     customFields: List<CustomField>,
+    createdAt: Long,
+    lastEditedAt: Long,
+    activity: List<EntryActivity>,
     isSaving: Boolean,
     onFieldOneChanged: (String) -> Unit,
     onFieldTwoChanged: (String) -> Unit,
@@ -295,6 +299,14 @@ fun PassDetailsContent(
             onRemoveClicked = onRemoveCustomField,
             onAddClicked = onAddCustomField,
             onCopyClicked = onCustomFieldCopyClicked,
+        )
+
+        // Read-only regardless of editMode: history is never a field, so it is not gated behind
+        // the edit toggle the way the form above it is.
+        EntryHistorySection(
+            createdAt = createdAt,
+            lastEditedAt = lastEditedAt,
+            activity = activity,
         )
 
         if (editMode) {

@@ -47,6 +47,9 @@ fun PassDetailsScreen(
     val totpSeed by presenter.totpSeed.collectAsState()
     val totpCode by presenter.totpCode.collectAsState()
     val customFields by presenter.customFields.collectAsState()
+    val createdAt by presenter.createdAt.collectAsState()
+    val lastEditedAt by presenter.lastEditedAt.collectAsState()
+    val activity by presenter.activity.collectAsState()
     val editModeEnabled by presenter.editMode.collectAsState()
     val isSaving by presenter.isSaving.collectAsState()
 
@@ -96,6 +99,9 @@ fun PassDetailsScreen(
         totpSeed = totpSeed,
         totpCode = totpCode,
         customFields = customFields,
+        createdAt = createdAt,
+        lastEditedAt = lastEditedAt,
+        activity = activity,
         isSaving = isSaving,
         onTotpSeedChanged = presenter::onTotpSeedChanged,
         onScanQrFromImage = qrImagePicker::openFilePicker,

@@ -1,8 +1,10 @@
 package ai.passman.design.pass
 
 import ai.passman.design.core.passmanTextFieldColors
+import ai.passman.design.util.formatDateTime
 import ai.passman.domain.password.GenerateTotpCode
 import ai.passman.domain.password.model.CustomField
+import ai.passman.domain.password.model.EntryActivity
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
@@ -22,6 +24,7 @@ import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -233,4 +236,88 @@ private fun ReadOnlyCustomFieldRow(
             }
         },
     )
+}
+
+/**
+ * Maps an [EntryActivity.kind] to the word shown in the history list.
+ *
+ * Deliberately a `when` with an `else`, not an exhaustive match over [EntryActivity.KIND_CREATED] /
+ * [EntryActivity.KIND_EDITED]. `kind` is a plain `String` precisely so a record written by a future
+ * build round-trips through this one (see [EntryActivity]'s KDoc); an exhaustive `when` would compile
+ * today and then either throw or drop the row the first time a peer on a newer build syncs in a kind
+ * this build has never heard of. "Changed" is that record surviving the trip, not a crash.
+ */
+internal fun activityKindLabel(kind: String): String = when (kind) {
+    EntryActivity.KIND_CREATED -> "Created"
+    EntryActivity.KIND_EDITED -> "Edited"
+    else -> "Changed"
+}
+
+/**
+ * One line of entry history: `<when> · <what>`, with the device appended only when known.
+ *
+ * [EntryActivity.device] is empty for every record this build writes — nothing populates it yet —
+ * so an empty value is "unknown", not "no device", and is omitted rather than rendered as a blank
+ * trailing segment. A later task starts writing it; this already renders it when present.
+ */
+@Composable
+private fun ActivityRow(record: EntryActivity, modifier: Modifier = Modifier) {
+    val text = if (record.device.isNotEmpty()) {
+        "${formatDateTime(record.at)} · ${activityKindLabel(record.kind)} · ${record.device}"
+    } else {
+        "${formatDateTime(record.at)} · ${activityKindLabel(record.kind)}"
+    }
+    Text(
+        text = text,
+        modifier = modifier.padding(0.dp, 2.dp, 0.dp, 2.dp),
+        color = MaterialTheme.colorScheme.onSurface,
+        style = MaterialTheme.typography.bodySmall,
+    )
+}
+
+/**
+ * Read-only history for one entry, shown on the details screen. Never editable and never wired into
+ * `formKeyboardNavigation` — it is a record of what happened, not a field.
+ *
+ * [activity] is sorted here for display, newest first, rather than positionally reversed.
+ * `mergeActivity` (`data/local/platform`) does leave the stored list ascending, but
+ * `PasswordEntry.activity` deliberately promises no ordering: a vault synced from a build this one
+ * has never merged with can hand over a list no local `mergeActivity` has touched, and reversing that
+ * positionally would render it in an order that is simply wrong. Sorting a copy is exactly as
+ * non-mutating as reversing one — the stored list is never reordered, which is what the merge cares
+ * about.
+ *
+ * A legacy entry synced before this schema step has an empty [activity] and a [createdAt] backfilled
+ * equal to [lastEditedAt] (`PasswordEntry.createdAt`'s KDoc). For it this renders the two timestamps
+ * and nothing else.
+ */
+@Composable
+fun EntryHistorySection(
+    createdAt: Long,
+    lastEditedAt: Long,
+    activity: List<EntryActivity>,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier.padding(0.dp, 10.dp, 0.dp, 0.dp)) {
+        HorizontalDivider()
+        Text(
+            text = "History",
+            modifier = Modifier.padding(0.dp, 10.dp, 0.dp, 5.dp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.titleSmall,
+        )
+        Text(
+            text = "Created ${formatDateTime(createdAt)}",
+            color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            text = "Last edited ${formatDateTime(lastEditedAt)}",
+            color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        activity.sortedByDescending { it.at }.forEach { record ->
+            ActivityRow(record)
+        }
+    }
 }

@@ -7,6 +7,7 @@ import ai.passman.domain.password.GenerateTotpCode
 import ai.passman.domain.password.GetPassword
 import ai.passman.domain.password.UpdatePassword
 import ai.passman.domain.password.model.CustomField
+import ai.passman.domain.password.model.EntryActivity
 import ai.passman.domain.password.model.PasswordEntry
 import ai.passman.domain.password.totp.TotpConfig
 import ai.passman.domain.settings.CopyToClipboard
@@ -51,6 +52,21 @@ open class PassDetailsViewModel(
     val totpSeed = MutableStateFlow("")
     val customFields = MutableStateFlow<List<CustomField>>(emptyList())
 
+    /** When this entry was actually first created. See [PasswordEntry.createdAt]. */
+    val createdAt = MutableStateFlow(0L)
+
+    /**
+     * [PasswordEntry.dateCreated] despite its name: it is overwritten on every edit and is what
+     * the rest of the app already treats as "last edited" (see that field's KDoc).
+     */
+    val lastEditedAt = MutableStateFlow(0L)
+
+    /**
+     * This entry's history, oldest-first as stored (`mergeActivity` sorts ascending and depends on
+     * that order). Reverse only where it is displayed, never here.
+     */
+    val activity = MutableStateFlow<List<EntryActivity>>(emptyList())
+
     /**
      * The code valid right now, or null when the entry has no (valid) seed. The ticker only runs
      * while something collects — leaving the screen stops it.
@@ -93,6 +109,9 @@ open class PassDetailsViewModel(
                 notes.emit(entry.notes)
                 totpSeed.emit(entry.totpSeed)
                 customFields.emit(entry.customFields)
+                createdAt.emit(entry.createdAt)
+                lastEditedAt.emit(entry.dateCreated)
+                activity.emit(entry.activity)
             } else {
                 // we have problems
                 KLogger.d {
@@ -215,6 +234,13 @@ open class PassDetailsViewModel(
             // Navigating away is this screen's success signal: leaving on a failed save tells the
             // user their edit landed when the repository just reported that it did not.
             if (saved) {
+                // No re-read of the history here. `updatePassword` appends the edit record inside the
+                // repository, so this ViewModel's copies do go stale — but Back is sent immediately
+                // below and the only handler pops the screen, so nothing rendered from them is ever
+                // seen again. Re-reading would cost a full vault decrypt, plus a second seal-and-write
+                // whenever the save renamed the entry and changed the sort order, all of it before
+                // navigation is even sent (`send` on a rendezvous channel suspends until it lands).
+                // Reopening the entry fetches it fresh.
                 // Flag stays up: Back is on its way and a freed button would double-pop the stack.
                 navigation.send(Back)
             } else {

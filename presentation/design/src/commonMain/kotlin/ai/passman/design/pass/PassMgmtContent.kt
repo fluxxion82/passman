@@ -1,5 +1,6 @@
 package ai.passman.design.pass
 
+import ai.passman.design.util.formatDate
 import ai.passman.domain.password.model.PasswordEntry
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -34,10 +35,8 @@ import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlin.time.Instant
-import kotlinx.datetime.TimeZone
-import kotlinx.datetime.toLocalDateTime
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -149,11 +148,16 @@ fun PassMgmtContent(
                         .padding(start = 10.dp, top = 20.dp, bottom = 20.dp, end = 10.dp),
                 ) {
                     Text(
+                        // Weighted with fill = false so a very long name yields the space the date
+                        // needs instead of measuring first and clipping it off the row entirely.
                         modifier = Modifier
+                            .weight(1f, fill = false)
                             .align(Alignment.CenterVertically),
                         text = pass.entryName,
                         color = MaterialTheme.colorScheme.onSurface,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
 
                     Spacer(modifier = Modifier.weight(1f))
@@ -161,7 +165,11 @@ fun PassMgmtContent(
                     Text(
                         modifier = Modifier
                             .align(Alignment.Bottom),
-                        text = Instant.fromEpochMilliseconds(pass.dateCreated).toLocalDateTime(TimeZone.currentSystemDefault()).date.toString(),
+                        // Labelled, not swapped for createdAt: this column has always shown
+                        // dateCreated, which despite its name is last-edited (PasswordEntry KDoc),
+                        // and users already read it that way. A bare date is ambiguous either way,
+                        // so the fix is the label, not a silent change of which timestamp shows here.
+                        text = "Edited ${formatDate(pass.dateCreated)}",
                         color = MaterialTheme.colorScheme.onSurface,
                         textAlign = TextAlign.End,
                         maxLines = 1,

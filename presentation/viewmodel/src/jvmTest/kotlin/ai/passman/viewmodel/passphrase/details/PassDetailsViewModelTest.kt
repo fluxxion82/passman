@@ -6,6 +6,7 @@ import ai.passman.domain.password.GenerateTotpCode
 import ai.passman.domain.password.GetPassword
 import ai.passman.domain.password.UpdatePassword
 import ai.passman.domain.password.model.CustomField
+import ai.passman.domain.password.model.EntryActivity
 import ai.passman.domain.password.model.PasswordEntry
 import ai.passman.domain.settings.CopyToClipboard
 import ai.passman.viewvo.passphrase.Back
@@ -191,6 +192,41 @@ class PassDetailsViewModelTest {
         assertEquals(listOf(CustomField(label = "pin", value = "5678", secret = true)), saved.captured.customFields)
         assertEquals("uuid-harbour", saved.captured.uuid, "identity must ride along untouched")
     }
+
+    @Test
+    fun `the history flows publish the fetched entry's values`() = runTest {
+        val records = listOf(EntryActivity(at = 10L, kind = EntryActivity.KIND_CREATED))
+        coEvery { getPassword.invoke("uuid-harbour") } returns stored.copy(
+            createdAt = 10L,
+            dateCreated = 30L,
+            activity = records,
+        )
+
+        val vm = newVm()
+        runCurrent()
+
+        assertEquals(10L, vm.createdAt.value)
+        assertEquals(30L, vm.lastEditedAt.value)
+        assertEquals(records, vm.activity.value)
+    }
+
+    @Test
+    fun `an entry with no activity still publishes both timestamps`() = runTest {
+        // A legacy row: createdAt backfilled equal to dateCreated, activity never populated.
+        coEvery { getPassword.invoke("uuid-harbour") } returns stored.copy(
+            createdAt = 41L,
+            dateCreated = 41L,
+            activity = emptyList(),
+        )
+
+        val vm = newVm()
+        runCurrent()
+
+        assertEquals(41L, vm.createdAt.value)
+        assertEquals(41L, vm.lastEditedAt.value)
+        assertEquals(emptyList(), vm.activity.value)
+    }
+
 
     @Test
     fun `an edited totp seed is validated and saved`() = runTest {
