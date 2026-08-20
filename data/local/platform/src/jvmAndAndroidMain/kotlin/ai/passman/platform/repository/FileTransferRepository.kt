@@ -236,6 +236,15 @@ class FileTransferRepository(
                         serverTls = serverTls,
                         // Narrow each paired device to only its permitted ops (esp. gate pgp-import).
                         authorizer = syncTlsProvider::authorize,
+                        // k2k creates upload temp files owner-only, and falls back to the process
+                        // umask on a filesystem with no POSIX attribute view. The fallback still
+                        // completes the upload, so without this hook a device where it happens
+                        // writes decrypted-payload-sized files at umask permissions and says
+                        // nothing — a silent downgrade, invisible in a bug report. Log it loudly:
+                        // if this ever fires, it is a real finding and not noise.
+                        onInsecureTempFile = { path ->
+                            KLogger.e { "upload temp file could not be made owner-only: $path" }
+                        },
                     )
                     embeddedServer?.start()
                 }.onFailure {
