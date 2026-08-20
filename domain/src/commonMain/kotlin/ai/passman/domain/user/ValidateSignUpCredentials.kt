@@ -21,6 +21,7 @@ class ValidateSignUpCredentials {
         val acceptable: Boolean get() = issues.isEmpty()
     }
 
+    @OptIn(ExperimentalStdlibApi::class)
     operator fun invoke(username: String, password: String): Result {
         val trimmedUsername = username.trim()
         val issues = buildList {
@@ -31,7 +32,8 @@ class ValidateSignUpCredentials {
             ) {
                 add(Issue.PasswordContainsUsername)
             }
-            if (password.isNotEmpty() && password.all { it == password.first() }) {
+            // allEqual has no CharSequence receiver (as of 2.4.20-RC), hence the asSequence bridge.
+            if (password.isNotEmpty() && password.asSequence().allEqual()) {
                 add(Issue.PasswordSingleCharacter)
             }
         }
