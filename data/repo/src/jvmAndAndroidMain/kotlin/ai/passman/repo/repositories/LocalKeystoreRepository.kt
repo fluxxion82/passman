@@ -2,6 +2,7 @@ package ai.passman.repo.repositories
 
 import ai.passman.crypto.Crypto
 import ai.passman.crypto.CryptoKey
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.keystore.KeystoreClient
 import ai.passman.keystore.model.Keystore
 import ai.passman.cache.KeyCacheManager
@@ -214,7 +215,7 @@ class LocalKeystoreRepository(
         newKeyAlgo: KeystoreKeyAlgorithm?
     ): Outcome<Unit> = withContext(coroutinesContextFacade.io) {
         KLogger.d {
-            "updateKeystore: $keystorePath, name: $keystoreName, keystorePassword: $keystorePassword, key: $newKeyAlias"
+            "updateKeystore: $keystorePath, name: $keystoreName, key: $newKeyAlias"
         }
         if (newKeyAlias?.isNotEmpty() == true) {
             val isAdded = keyStoreClient.addKeystoreKey(
@@ -435,7 +436,7 @@ class LocalKeystoreRepository(
             }
         }
 
-    override suspend fun transferKeystores(hostName: String): Outcome<Unit> = withContext(coroutinesContextFacade.io) {
+    override suspend fun transferKeystores(device: TrustedDevice): Outcome<Unit> = withContext(coroutinesContextFacade.io) {
         runCatching {
             val user = userPreferences.getUser() as AppUser.LoggedIn
             val keysDir = File("$keystoreDir${user.userName}")
@@ -448,17 +449,17 @@ class LocalKeystoreRepository(
             val excluded = DirectoryBundler.syncExclusions(user.userName)
             val bundleBytes = DirectoryBundler.bundle(keysDir, excludeBaseNames = excluded)
             val fileName = "${user.userName.hashCode()}_keystore"
-            keystoreTransferService.transferKeystoreBundle(bundleBytes, fileName, hostName)
+            keystoreTransferService.transferKeystoreBundle(bundleBytes, fileName, device)
         }.getOrElse {
             KLogger.e(it) { "failed to transfer keystores" }
             Outcome.Error("failed to transfer keystores: ${it.message}", TransferFailure.GeneralTransferFailure)
         }
     }
 
-    override suspend fun pushKeystores(hostName: String): Outcome<Unit> = transferKeystores(hostName)
+    override suspend fun pushKeystores(device: TrustedDevice): Outcome<Unit> = transferKeystores(device)
 
-    override suspend fun pullKeystores(hostName: String): Outcome<Unit> = withContext(coroutinesContextFacade.io) {
-        when (val pullOutcome = keystoreTransferService.pullKeystoreBundle(hostName = hostName)) {
+    override suspend fun pullKeystores(device: TrustedDevice): Outcome<Unit> = withContext(coroutinesContextFacade.io) {
+        when (val pullOutcome = keystoreTransferService.pullKeystoreBundle(device = device)) {
             is Outcome.Error -> pullOutcome
             is Outcome.Success -> {
                 // The transfer service already decrypted the (post-quantum) response.
