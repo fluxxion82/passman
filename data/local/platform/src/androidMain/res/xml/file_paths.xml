@@ -1,4 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  The roots a content:// URI may be minted for. Deliberately NOT the whole of filesDir.
+
+  Everything this app shares is a keystore or a PGP key: the three producers are the keystore
+  share (KeystoreDetailsViewModel), the public-key share and the guarded private-key export
+  (PgpKeyDetailsViewModel). Nothing else calls shareFile.
+
+  A wider root than that is not merely untidy. AndroidSettingsService treats
+  FileProvider.getUriForFile as a security boundary — it catches the throw and logs "path is
+  outside the FileProvider root" — and with a root of "." that check can never fire for anything
+  the app itself wrote. Naming only the two directories that are genuinely shareable is what
+  makes that guard real, and it puts the vault database, the device keyring (keyring.pmk), the
+  portable-recovery material and the staged sync temp files permanently out of reach of a
+  content URI, whatever a future call site asks for.
+
+  Files picked by the user are staged into cacheDir by AndroidFileHandler and are already
+  outside these roots, so the import path does not depend on any of this.
+-->
 <paths>
-    <files-path name="files" path="." />
+    <files-path name="keystore" path="keystore/" />
+    <files-path name="pgp" path="pgp/" />
 </paths>
