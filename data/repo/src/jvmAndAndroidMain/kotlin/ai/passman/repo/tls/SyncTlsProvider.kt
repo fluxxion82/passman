@@ -6,6 +6,7 @@ import ai.passman.domain.connectivity.model.PairingSecurity
 import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.domain.connectivity.repository.TrustedDevicesRepository
 import ai.passman.domain.user.repository.UserPreferences
+import ai.passman.logging.KLogger
 import com.k2k.test.tls.K2kClientTls
 import com.k2k.test.tls.K2kServerTls
 import java.security.Key
@@ -52,26 +53,48 @@ class SyncTlsProvider(
     }
 
     /**
-     * The paired device whose frozen RSA SPKI pin matches the caller's verified TLS [pin], or null
-     * for an unknown or absent pin. This is how the receive side learns *which* authenticated device
-     * sent a payload — the k2k handlers thread the pin through, and everything the signed-hybrid
-     * policy decides is keyed on the device resolved here.
+     * Every paired device whose frozen RSA SPKI pin matches the caller's verified TLS [pin].
      *
-     * KNOWN SEPARATE ISSUE, deliberately untouched: this is a first match keyed on *fingerprint*,
-     * and re-pairing one physical peer under a new name leaves two records sharing a fingerprint as
-     * well as a host. [authorize] below therefore decides an inbound operation against whichever of
-     * them happens to be first, so the two records' `allowedOps` and `pairingSecurity` are not
-     * interchangeable the way the identical pins make them look. The sender-side fix (threading the
-     * chosen [TrustedDevice] through the session) does not reach this receive-side path, which has
-     * no chooser and only ever sees a pin on the wire; resolving it needs its own decision about
-     * what an ambiguous pin should mean for authorization, so it is left as-is rather than
-     * half-changed here.
+     * Normally none or one. More than one is reachable: re-pairing the same physical peer under a
+     * new name leaves two records holding the same fingerprint, since the fingerprint is that
+     * device's long-term identity and not a property of the pairing ceremony. Exposed as a list so
+     * callers can tell "nobody" from "several", which need different answers and very different
+     * error messages.
      */
-    suspend fun deviceForPin(pin: String?): TrustedDevice? {
-        if (pin == null) return null
-        return trustedDevices.getAll().firstOrNull {
+    suspend fun devicesForPin(pin: String?): List<TrustedDevice> {
+        if (pin == null) return emptyList()
+        return trustedDevices.getAll().filter {
             TlsIdentity.fingerprintToPin(it.fingerprint) == pin
         }
+    }
+
+    /**
+     * The single paired device behind [pin], or null when no pairing matches — or when more than
+     * one does.
+     *
+     * One match or nothing, never a first match. What this returns is not a label: it selects the
+     * inbound decryption policy and the per-op allowlist, so with two records sharing a fingerprint
+     * an arbitrary winner meant an inbound payload could be accepted as `LegacyRsa` while the other
+     * record demanded a signed hybrid envelope — a silent downgrade of the exact boundary pairing
+     * exists to hold — or granted an op the other record's `allowedOps` refused.
+     *
+     * Refusing is the fail-closed reading and the recoverable one: the records genuinely disagree
+     * about policy and nothing here can say which is authoritative, whereas the user can delete the
+     * duplicate pairing. It also matches
+     * [ai.passman.domain.connectivity.repository.TrustedDevicesRepository.getByHost], so ambiguity
+     * means the same thing whichever direction a session is running in.
+     */
+    suspend fun deviceForPin(pin: String?): TrustedDevice? {
+        val matches = devicesForPin(pin)
+        if (matches.size > 1) {
+            // The pin is not logged: it is the peer's identity on the wire.
+            KLogger.w {
+                "${matches.size} pairings share the caller's fingerprint; refusing rather than " +
+                    "choosing one of them - remove the duplicate pairing"
+            }
+            return null
+        }
+        return matches.singleOrNull()
     }
 
     /**

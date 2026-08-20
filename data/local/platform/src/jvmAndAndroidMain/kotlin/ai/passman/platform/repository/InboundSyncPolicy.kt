@@ -31,9 +31,21 @@ internal class InboundSyncPolicy(
      * misconfiguration, not a legacy case) and on a pin no paired device matches (e.g. the device
      * was removed after its TLS handshake).
      */
-    suspend fun trustedSender(pin: String?): TrustedDevice =
-        syncTlsProvider.deviceForPin(pin)
-            ?: error("inbound sync rejected: caller pin '${pin ?: "<none>"}' does not match a paired device")
+    suspend fun trustedSender(pin: String?): TrustedDevice {
+        val matches = syncTlsProvider.devicesForPin(pin)
+        return when (matches.size) {
+            1 -> matches.single()
+            0 -> error("inbound sync rejected: caller pin '${pin ?: "<none>"}' does not match a paired device")
+            // A separate message because the remedy is different: not "pair this device" but
+            // "remove the duplicate pairing". Resolving to one of them would pick the decryption
+            // policy by accident, which is how an unsigned payload gets accepted for a pairing that
+            // requires a signed hybrid envelope.
+            else -> error(
+                "inbound sync rejected: caller pin matches ${matches.size} pairings " +
+                    "(${matches.joinToString { it.name }}); their policies may differ, so none is applied",
+            )
+        }
+    }
 
     /**
      * Decrypt an inbound payload under [sender]'s pairing policy — exhaustive, so a new

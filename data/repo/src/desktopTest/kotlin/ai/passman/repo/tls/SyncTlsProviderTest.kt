@@ -18,6 +18,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -73,6 +74,43 @@ class SyncTlsProviderTest {
         assertEquals(setOf("aabbccdd"), client.serverPins)
         assertTrue(provider.authorize(SyncOps.PASSWORDS, "aabbccdd"))
         assertEquals(0, devices.reverificationCalls)
+    }
+
+    /**
+     * A fingerprint is the peer's long-term identity, not a property of one pairing, so re-pairing
+     * the same physical device under a new name leaves two records carrying it. `authorize` used to
+     * decide against whichever came first, which meant an op one record's `allowedOps` refused
+     * could be granted by the other — and, worse, that the same arbitrary choice picked the inbound
+     * decryption policy. Ambiguity is refused, matching what `getByHost` does on the send side.
+     */
+    @Test
+    fun `authorization refuses a pin that two pairings share`() = runBlocking {
+        val devices = RecordingTrustedDevices(
+            listOf(
+                TrustedDevice(
+                    name = "phone",
+                    fingerprint = "AA:BB:CC:DD",
+                    lastHost = "192.0.2.44",
+                    allowedOps = setOf(SyncOps.PASSWORDS),
+                    pairingSecurity = PairingSecurity.LegacyRsa,
+                ),
+                TrustedDevice(
+                    name = "phone (re-paired)",
+                    fingerprint = "AA:BB:CC:DD",
+                    lastHost = "192.0.2.44",
+                    allowedOps = setOf(SyncOps.PASSWORDS),
+                    pairingSecurity = PairingSecurity.SignedHybridRequired,
+                ),
+            ),
+        )
+        val provider = SyncTlsProvider(FakePreferences(), devices)
+
+        assertFalse(
+            provider.authorize(SyncOps.PASSWORDS, "aabbccdd"),
+            "an op must not be granted on the strength of whichever duplicate pairing sorted first",
+        )
+        assertNull(provider.deviceForPin("aabbccdd"))
+        assertEquals(2, provider.devicesForPin("aabbccdd").size, "both records still match the pin")
     }
 
     /**

@@ -301,6 +301,45 @@ class SignedHybridSyncPolicyTest {
         }
     }
 
+    /**
+     * Two records can share a fingerprint: it is the peer's long-term identity, not a property of
+     * the pairing ceremony, so re-pairing one physical device under a new name leaves both. The pin
+     * on the wire then matches both, and a first-match lookup picked the decryption POLICY by
+     * accident — accepting an unsigned legacy envelope because the older record said LegacyRsa,
+     * while the newer one demanded a signed hybrid. That is a silent downgrade of the boundary
+     * pairing exists to hold, so an ambiguous pin is refused instead.
+     */
+    @Test
+    fun anAmbiguousSenderPinIsRefusedRatherThanResolvedToOneOfTheRecords() = runBlocking<Unit> {
+        val repo = repository(FakeTrustedDevices(legacySenderDevice(), signedSenderDevice()))
+        val legacyEnvelope = EnvelopeCodec.encryptHybrid("legacy v3 vault".encodeToByteArray(), localHybridPublicKey())
+
+        val failure = assertFailsWith<IllegalStateException> {
+            repo.processUploadedFile(legacyEnvelope, STAGED, SENDER_PIN)
+        }
+
+        assertTrue(
+            failure.message.orEmpty().contains("2 pairings"),
+            "the refusal must name the ambiguity, since the fix is to remove a duplicate pairing " +
+                "rather than to pair the device: ${failure.message}",
+        )
+        assertNothingStaged()
+    }
+
+    @Test
+    fun anAmbiguousSenderPinIsRefusedEvenWhenBothRecordsWouldAllowThePayload() = runBlocking<Unit> {
+        // Both LegacyRsa, so no policy disagreement — still refused. Whether the records happen to
+        // agree today is not something the receive side can rely on, and a rule that only applies
+        // when it would have mattered is a rule nobody can reason about.
+        val duplicate = legacySenderDevice().copy(name = "legacy peer (re-paired)")
+        val repo = repository(FakeTrustedDevices(legacySenderDevice(), duplicate))
+        val legacyEnvelope = EnvelopeCodec.encryptHybrid("legacy v3 vault".encodeToByteArray(), localHybridPublicKey())
+
+        assertFailsWith<IllegalStateException> {
+            repo.processUploadedFile(legacyEnvelope, STAGED, SENDER_PIN)
+        }
+    }
+
     @Test
     fun legacyRsaSender_unsignedV3_isAcceptedExactlyAsToday() = runBlocking<Unit> {
         val repo = repository(FakeTrustedDevices(legacySenderDevice()))
