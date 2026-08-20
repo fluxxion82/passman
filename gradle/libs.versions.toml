@@ -20,7 +20,7 @@ compileSdk = "37"
 
 ## Toolchain
 agp = "9.3.1"
-kotlin = "2.4.10"
+kotlin = "2.4.20-RC"
 
 ## Kotlinx
 coroutines = "1.11.0"
