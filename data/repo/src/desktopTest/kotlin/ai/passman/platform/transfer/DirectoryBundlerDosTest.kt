@@ -8,6 +8,7 @@ import java.util.zip.ZipOutputStream
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -40,6 +41,65 @@ class DirectoryBundlerDosTest {
             }
         }
         return out.toByteArray()
+    }
+
+    @Test
+    fun aRejectedBundleLeavesNothingBehind() {
+        // The caps throw from inside an open output stream, so writing straight to the final paths
+        // left earlier entries committed and the current one truncated. A caller that treats the
+        // throw as "push rejected" would then be wrong about what is on disk.
+        val bundle = zipOf(
+            listOf(
+                "good.asc" to ByteArray(512) { 1 },
+                "big.bin" to ByteArray(4_096) { 0 },
+            ),
+        )
+
+        assertFailsWith<DirectoryBundler.BundleTooLargeException> {
+            DirectoryBundler.unbundle(bundle, destDir, maxTotalBytes = 1_024)
+        }
+
+        assertFalse(
+            File(destDir, "good.asc").exists(),
+            "an entry from a bundle that failed validation must not survive in the destination",
+        )
+        assertFalse(File(destDir, "big.bin").exists(), "the truncated entry must not survive either")
+    }
+
+    @Test
+    fun aRejectedBundleDoesNotDamageWhatWasAlreadyThere() {
+        val existing = File(destDir, "good.asc").apply { writeBytes(ByteArray(64) { 7 }) }
+        val bundle = zipOf(
+            listOf(
+                "good.asc" to ByteArray(512) { 1 },
+                "big.bin" to ByteArray(4_096) { 0 },
+            ),
+        )
+
+        assertFailsWith<DirectoryBundler.BundleTooLargeException> {
+            DirectoryBundler.unbundle(bundle, destDir, maxTotalBytes = 1_024)
+        }
+
+        // The pre-existing key file is what a failed sync used to overwrite with a prefix of the
+        // peer's copy. A truncated ring is skipped by the key listing without a word, so the key
+        // would simply have vanished.
+        assertContentEquals(ByteArray(64) { 7 }, existing.readBytes())
+    }
+
+    @Test
+    fun stagingIsNotLeftBesideTheDestination() {
+        val bundle = zipOf(listOf("a.asc" to ByteArray(8) { 3 }))
+
+        DirectoryBundler.unbundle(bundle, destDir)
+
+        // Staging is a sibling of destDir, so a leaked one would sit next to the artifact directory
+        // and, worse, be a candidate for the next outbound bundle of the parent.
+        val siblings = destDir.parentFile.listFiles().orEmpty().map { it.name }
+        assertFalse(
+            siblings.any { it.startsWith(destDir.name) && it != destDir.name },
+            "no staging directory may remain: $siblings",
+        )
+        assertContentEquals(ByteArray(8) { 3 }, File(destDir, "a.asc").readBytes())
     }
 
     @Test

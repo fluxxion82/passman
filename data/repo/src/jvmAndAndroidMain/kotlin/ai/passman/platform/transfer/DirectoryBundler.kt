@@ -1,5 +1,6 @@
 package ai.passman.platform.transfer
 
+import ai.passman.crypto.io.DurableFiles
 import ai.passman.keystore.KeystoreClient
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -193,6 +194,24 @@ object DirectoryBundler {
         val excludedResolvedNames = excludeBaseNames.mapTo(HashSet()) { it.lowercase() }
         var entries = 0
         var total = 0L
+
+        // Extract to a staging directory first, and only move files into place once the whole
+        // bundle has been read. Writing straight to the final paths meant a bundle that failed
+        // partway - the size caps below throw from *inside* an open output stream - left the
+        // previous entries committed and the current one truncated. That is not a visible failure
+        // afterwards: a truncated PGP ring is silently skipped by the key listing, so the key just
+        // disappears, and a truncated keystore still lists (getAllKeystores filters by extension,
+        // it does not parse) and fails later looking like a wrong password.
+        //
+        // A SIBLING of destDir, never a child: this same object bundles destDir, so staging inside
+        // it would make the half-written copies candidates for the next outbound bundle. Sibling
+        // also keeps staging on the same filesystem, which is what lets the commit below be an
+        // atomic rename rather than a copy.
+        val staging = File(destDir.parentFile ?: destDir, "${destDir.name}$UNBUNDLE_STAGING_SUFFIX")
+        staging.deleteRecursively()
+        staging.mkdirs()
+
+        try {
         ZipInputStream(bundleBytes.inputStream()).use { zip ->
             var entry: ZipEntry? = zip.nextEntry
             while (entry != null) {
@@ -215,11 +234,12 @@ object DirectoryBundler {
                     entry = zip.nextEntry
                     continue
                 }
+                val staged = File(staging, safeRelative)
                 if (entry.isDirectory) {
-                    target.mkdirs()
+                    staged.mkdirs()
                 } else {
-                    target.parentFile?.mkdirs()
-                    target.outputStream().use { out ->
+                    staged.parentFile?.mkdirs()
+                    staged.outputStream().use { out ->
                         val buffer = ByteArray(8_192)
                         var read = zip.read(buffer)
                         while (read >= 0) {
@@ -236,7 +256,31 @@ object DirectoryBundler {
                 entry = zip.nextEntry
             }
         }
+
+            // Every entry read and validated. Commit each file with an atomic rename, so a file
+            // in destDir is either its old contents or its new contents and never a prefix of the
+            // new ones. This is a merge into an existing directory rather than a replacement of
+            // it, so per-file atomicity is the guarantee on offer: nothing lands unless the whole
+            // bundle validated, and each file that lands, lands whole.
+            staging.walkTopDown()
+                .filter { it.isFile }
+                .forEach { source ->
+                    val relative = source.relativeTo(staging).path
+                    val target = File(destDir, relative)
+                    target.parentFile?.mkdirs()
+                    DurableFiles.replace(source, target)
+                }
+        } finally {
+            staging.deleteRecursively()
+        }
     }
+
+    /**
+     * Suffix for the staging directory [unbundle] extracts into. Distinct from [TEMP_FILE_SUFFIX],
+     * which names transient *files inside* an artifact directory; this names a whole directory
+     * beside one.
+     */
+    private const val UNBUNDLE_STAGING_SUFFIX = ".unbundle-staging"
 
     class BundleTooLargeException(message: String) : Exception(message)
 }
