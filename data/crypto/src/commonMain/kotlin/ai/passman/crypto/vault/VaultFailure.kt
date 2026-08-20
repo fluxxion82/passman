@@ -1,5 +1,8 @@
 package ai.passman.crypto.vault
 
+import kotlin.coroutines.ExperimentalStdlibCoroutineSupportApi
+import kotlin.coroutines.debug.StackTraceRecoverable
+
 /**
  * Why a keyring or vault artifact could not be opened.
  *
@@ -61,9 +64,18 @@ sealed class VaultFailure(message: String, cause: Throwable? = null) : Exception
      *   versus restore the vault — and callers must switch on this flag rather than on [message],
      *   which is prose and will be reworded.
      */
+    @OptIn(ExperimentalStdlibCoroutineSupportApi::class)
     class Malformed(
         message: String,
         cause: Throwable? = null,
         val legacyKeyUnavailable: Boolean = false,
-    ) : VaultFailure(message, cause)
+    ) : VaultFailure(message, cause), StackTraceRecoverable<Malformed> {
+        // Coroutine stack trace recovery copies exceptions reflectively via a (message, cause)
+        // constructor, which this class does not have — so a Malformed rethrown across a
+        // suspension kept its original (less useful) trace and, worse, any future reflective
+        // copy would default legacyKeyUnavailable to false and send the caller down the wrong
+        // recovery path. This copy carries the flag explicitly.
+        override fun copyForStackTraceRecovery(): Malformed =
+            Malformed(message ?: "malformed vault artifact", this, legacyKeyUnavailable)
+    }
 }
