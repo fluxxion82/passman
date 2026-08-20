@@ -8,7 +8,6 @@ import ai.passman.crypto.vault.VaultSession
 import ai.passman.crypto.vault.VaultSessionKey
 import ai.passman.platform.crypto.SecureRandomService
 import ai.passman.platform.keyring.KeyringRepository
-import ai.passman.platform.service.BioAuthService
 import ai.passman.platform.service.KeystoreLifecycle
 import ai.passman.platform.service.PgpKeyRingService
 import ai.passman.platform.storage.PasswordDatabaseStorage
@@ -23,8 +22,10 @@ import ai.passman.domain.base.model.Outcome
 import ai.passman.domain.exception.Failure
 import ai.passman.domain.user.exception.AuthFailure
 import ai.passman.domain.user.models.AppUser
+import ai.passman.domain.user.models.BiometricUnlockState
 import ai.passman.domain.user.models.KdfParams
 import ai.passman.domain.user.models.Password
+import ai.passman.domain.user.repository.BiometricUnlockRepository
 import ai.passman.domain.user.repository.UserPreferences
 import ai.passman.domain.user.repository.UserRepository
 import kotlin.io.encoding.Base64
@@ -108,11 +109,11 @@ class LocalUserRepository(
     private val storage: PasswordDatabaseStorage,
     private val passwordHasher: PasswordHasher,
     private val secureRandom: SecureRandomService,
-    private val bioAuthService: BioAuthService,
+    private val biometricUnlock: BiometricUnlock,
     private val keyringRepository: KeyringRepository,
     private val vaultCipher: VaultCipher,
     private val portableVaultFormat: PortableVaultFormat? = null,
-) : UserRepository {
+) : UserRepository, BiometricUnlockRepository {
 
     private val keystoreDir = "${platform.getLocalPath()}/keystore/"
     private val pgpDir = "${platform.getLocalPath()}/pgp/"
@@ -170,30 +171,6 @@ class LocalUserRepository(
         } ?: Outcome.Error("Failed to create scope", AuthFailure.SignupFailure)
     }
 
-    override suspend fun bioSignup(username: String, password: String): Outcome<AppUser> = withContext(coroutinesContextFacade.io) {
-        if (accountExists(username)) {
-            return@withContext Outcome.Error("account exists", AuthFailure.AccountAlreadyExists)
-        }
-
-        passmanSessionScope(userPreferences.getSessionId()) { scope ->
-            bootstrapAccount(
-                scope,
-                username,
-                password,
-                afterIdentityStore = { storePassword ->
-                    when (bioAuthService.authenticate(hardwareKeySeed = null)) {
-                        BioAuthService.Result.Success -> {
-                            warmIdentityKeys(scope, username, storePassword)
-                            null
-                        }
-                        BioAuthService.Result.Failed,
-                        BioAuthService.Result.Unavailable -> Outcome.Error("Auth failed", AuthFailure.BioAuthFailed)
-                    }
-                },
-            )
-        } ?: Outcome.Error("Failed to create scope", AuthFailure.SignupFailure)
-    }
-
     override suspend fun login(username: String, password: String): Outcome<AppUser> = withContext(coroutinesContextFacade.io) {
         KLogger.d { "login: username=$username" }
 
@@ -209,24 +186,50 @@ class LocalUserRepository(
         } ?: Outcome.Error("Failed to create scope", AuthFailure.LoginFailure)
     }
 
-    override suspend fun bioLogin(username: String, password: String): Outcome<AppUser> = withContext(coroutinesContextFacade.io) {
-        val storedCredentials = when (val verified = verifiedCredentials(username, password)) {
-            is Outcome.Error -> return@withContext verified
-            is Outcome.Success -> verified.value
+    /**
+     * Recover the master password from the account's biometric enrolment and then log in with it.
+     *
+     * The second line is the whole method, and it is deliberately a call to [login] rather than a
+     * copy of it. The version this replaced differed from [login] by one line — it demanded the
+     * typed password *as well* as a fingerprint, and the fingerprint result was a boolean nothing
+     * cryptographic depended on. So the feature was a second factor pretending to be a first, and
+     * the login path had a fork whose only distinguishing behaviour was an extra prompt.
+     *
+     * Delegating means every property of a password login holds here without being restated:
+     * the credential check, the legacy-KDF upgrade, the staged-keyring resume, the identity-store
+     * migration, the throttle upstream. It also means a **stale** wrapped password (changed on
+     * another device, synced here) fails the ordinary credential check instead of being trusted.
+     *
+     * The only method here without a `withContext(io)` wrapper, and deliberately: the recovery ends
+     * in a system prompt that has to run on the main thread, so it dispatches itself, and [login]
+     * takes the IO hop for the half that needs it.
+     */
+    override suspend fun bioLogin(username: String): Outcome<AppUser> {
+        val password = when (val unlocked = biometricUnlock.unlock(username)) {
+            is Outcome.Error -> return unlocked
+            is Outcome.Success -> unlocked.value
         }
+        return login(username, password)
+    }
 
-        when (bioAuthService.authenticate(hardwareKeySeed = null)) {
-            BioAuthService.Result.Success -> {
-                passmanSessionScope(userPreferences.getSessionId()) { scope ->
-                    openSession(scope, username, password) {
-                        Outcome.Success(AppUser.LoggedIn(userName = username, password = storedCredentials))
-                    }
-                } ?: Outcome.Error("Failed to create scope", AuthFailure.LoginFailure)
-            }
-            BioAuthService.Result.Failed,
-            BioAuthService.Result.Unavailable -> Outcome.Error("Auth failed", AuthFailure.BioAuthFailed)
+    /**
+     * Enrolling is the one moment a copy of the master password is made, so it happens only after
+     * [verifiedCredentials] has said the caller knows it — which is also what makes the settings
+     * screen, and not the login screen, the right place to offer this. A login screen has a
+     * *claimed* password; verifying it there to enrol would be an oracle that answers "is this the
+     * password?" without signing anybody in.
+     */
+    override suspend fun enable(username: String, password: String): Outcome<Unit> = withContext(coroutinesContextFacade.io) {
+        when (val verified = verifiedCredentials(username, password)) {
+            is Outcome.Error -> verified
+            is Outcome.Success -> biometricUnlock.enroll(username, password)
         }
     }
+
+    override suspend fun disable(username: String) = biometricUnlock.disable(username)
+
+    override suspend fun biometricUnlockState(username: String): BiometricUnlockState =
+        biometricUnlock.state(username)
 
     /**
      * A password change rewraps `keyring.pmk` and nothing else.
@@ -389,6 +392,18 @@ class LocalUserRepository(
                         AuthFailure.GeneralAuthFailure("could not promote the rewrapped keyring"),
                     )
                 }
+
+                // The wrapped copy holds the password that was just retired. Two reasons it goes,
+                // and the second is the one that matters: it would hand out a string that no longer
+                // verifies (a login that fails for no visible reason), and until the user noticed,
+                // the *old* master password would still be recoverable from this device with a
+                // fingerprint — after they had deliberately rotated it. Only a change that got all
+                // the way here clears it; every failure path above leaves the old password current
+                // and the enrolment correct.
+                //
+                // Best-effort by design: the change has already committed and cannot be undone by a
+                // preferences write that failed, so a failure here is logged inside disable().
+                biometricUnlock.disable(user.userName)
 
                 Outcome.Success(changed)
             }

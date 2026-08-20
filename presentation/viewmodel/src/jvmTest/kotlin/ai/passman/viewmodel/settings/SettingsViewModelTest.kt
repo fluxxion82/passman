@@ -17,6 +17,12 @@ import ai.passman.domain.settings.model.ThemeMode
 import ai.passman.domain.settings.repository.ClipboardPreferences
 import ai.passman.domain.settings.repository.ThemePreferences
 import ai.passman.domain.user.ChangeUserPassword
+import ai.passman.domain.user.GetBiometricUnlockState
+import ai.passman.domain.user.SetBiometricUnlock
+import ai.passman.domain.user.exception.AuthFailure
+import ai.passman.domain.user.models.BiometricAvailability
+import ai.passman.domain.user.models.BiometricUnlockState
+import ai.passman.domain.user.repository.BiometricUnlockRepository
 import ai.passman.domain.user.models.AppUser
 import ai.passman.domain.user.models.Password
 import ai.passman.domain.user.repository.UserPreferences
@@ -51,6 +57,7 @@ class SettingsViewModelTest {
 
     private val preferences = FakeClipboardPreferences(ClipboardExpiry(enabled = true, duration = 30.seconds))
     private val themePreferences = FakeThemePreferences(ThemeMode.System)
+    private val biometricUnlock = FakeBiometricUnlockRepository()
 
     @BeforeTest
     fun setup() {
@@ -69,12 +76,15 @@ class SettingsViewModelTest {
         getPortableVaultAccess: GetPortableVaultAccess? = null,
         copyToClipboard: CopyToClipboard? = null,
         upgradePortableVaultRecovery: UpgradePortableVaultRecovery? = null,
+        biometrics: FakeBiometricUnlockRepository = biometricUnlock,
     ) = SettingsViewModel(
         changeUserPassword = ChangeUserPassword(userRepository, RecordingUserPreferences),
         getClipboardExpiry = GetClipboardExpiry(preferences),
         setClipboardExpiry = SetClipboardExpiry(preferences),
         getThemeMode = GetThemeMode(themePreferences),
         setThemeMode = SetThemeMode(themePreferences),
+        getBiometricUnlockState = GetBiometricUnlockState(biometrics, RecordingUserPreferences),
+        setBiometricUnlock = SetBiometricUnlock(biometrics, RecordingUserPreferences),
         getPortableVaultAccess = getPortableVaultAccess,
         copyToClipboard = copyToClipboard,
         upgradePortableVaultRecovery = upgradePortableVaultRecovery,
@@ -307,6 +317,142 @@ class SettingsViewModelTest {
         assertEquals(legacy, vm.portableVaultAccess.value)
         assertEquals("Recovery upgrade failed", vm.userMessages.receive())
     }
+
+    // ---------------------------------------------------------- biometric unlock
+
+    /**
+     * The switch does not follow the finger on the way ON.
+     *
+     * Enrolment makes a second copy of the master password, so it may only happen at a moment the
+     * user has just proved they know it — and on a screen inside an already-unlocked session, the
+     * only way to establish that is to ask. A switch that flipped on tap and back on failure would
+     * be reporting an enrolment that does not exist.
+     */
+    @Test
+    fun `turning it on asks for the master password instead of enrolling`() = runTest {
+        val vm = newVm()
+        runCurrent()
+
+        vm.onBiometricUnlockToggled(true)
+        runCurrent()
+
+        assertTrue(vm.biometricPasswordDialogVisible.value)
+        assertFalse(vm.biometricUnlock.value.enrolled, "nothing is enrolled until the password is confirmed")
+        assertTrue(biometricUnlock.enableCalls.isEmpty())
+    }
+
+    @Test
+    fun `a confirmed master password enrols and closes the dialog`() = runTest {
+        val vm = newVm()
+        runCurrent()
+
+        vm.onBiometricUnlockToggled(true)
+        vm.onBiometricPasswordChanged("master")
+        vm.onBiometricEnrollConfirmed()
+        runCurrent()
+
+        assertEquals(listOf("mia" to "master"), biometricUnlock.enableCalls)
+        assertTrue(vm.biometricUnlock.value.enrolled)
+        assertFalse(vm.biometricPasswordDialogVisible.value)
+        assertEquals("", vm.biometricPassword.value, "the master password must not outlive the enrolment")
+        assertEquals("Biometric unlock turned on", vm.userMessages.receive())
+    }
+
+    @Test
+    fun `a rejected master password keeps the dialog up with the reason`() = runTest {
+        val vm = newVm()
+        runCurrent()
+
+        vm.onBiometricUnlockToggled(true)
+        vm.onBiometricPasswordChanged("wrong")
+        vm.onBiometricEnrollConfirmed()
+        runCurrent()
+
+        assertTrue(vm.biometricPasswordDialogVisible.value, "the user has to be able to read why and retry")
+        assertEquals("Password is incorrect", vm.biometricUnlockError.value)
+        assertFalse(vm.biometricUnlock.value.enrolled)
+    }
+
+    /** Destroying a secret needs no proof of anything; only creating one does. */
+    @Test
+    fun `turning it off disables without asking for a password`() = runTest {
+        biometricUnlock.enrolled = true
+        val vm = newVm()
+        runCurrent()
+        assertTrue(vm.biometricUnlock.value.enrolled)
+
+        vm.onBiometricUnlockToggled(false)
+        runCurrent()
+
+        assertEquals(listOf("mia"), biometricUnlock.disableCalls)
+        assertFalse(vm.biometricUnlock.value.enrolled)
+        assertFalse(vm.biometricPasswordDialogVisible.value)
+        assertEquals("Biometric unlock turned off", vm.userMessages.receive())
+    }
+
+    /**
+     * The repository retires the enrolment as part of a successful change — the wrapped copy holds
+     * the password that was just replaced. The switch has to say so, or it keeps claiming an
+     * enrolment that no longer exists.
+     */
+    @Test
+    fun `a successful master password change turns the switch off`() = runTest {
+        biometricUnlock.enrolled = true
+        val repository = GatedUserRepository()
+        val vm = newVm(repository)
+        runCurrent()
+        assertTrue(vm.biometricUnlock.value.enrolled)
+
+        vm.onChangePasswordClicked()
+        runCurrent()
+        repository.finish(Outcome.Success(AppUser.LoggedIn("mia", Password(hash = "h", salt = "s"))))
+        runCurrent()
+
+        assertFalse(vm.biometricUnlock.value.enrolled)
+    }
+
+    /** Hardware that will never have a sensor gets no row at all, rather than one that cannot move. */
+    @Test
+    fun `the row is withheld entirely on hardware with no sensor`() = runTest {
+        biometricUnlock.availability = BiometricAvailability.NoHardware
+        val vm = newVm()
+        runCurrent()
+
+        assertFalse(vm.biometricUnlock.value.offerable)
+    }
+
+    /** Every other unavailable state is something the user can fix, so the row stays and explains. */
+    @Test
+    fun `the row stays when the device simply has no biometric registered`() = runTest {
+        biometricUnlock.availability = BiometricAvailability.NotEnrolled
+        val vm = newVm()
+        runCurrent()
+
+        assertTrue(vm.biometricUnlock.value.offerable)
+        assertFalse(vm.biometricUnlock.value.canUnlock)
+    }
+
+    /**
+     * Same staleness rule the clipboard toggle has: a user who reaches the switch before the stored
+     * value lands must not have their choice overwritten by the value that was stored before it.
+     *
+     * Only [BiometricUnlockState.enrolled] is stale-able, though. The device's availability is not
+     * something the switch can change, and discarding it here would leave the row hidden for the
+     * rest of the screen's life on the strength of one early tap.
+     */
+    @Test
+    fun `a stored enrolment arriving after the user turns it off does not undo their choice`() = runTest {
+        biometricUnlock.enrolled = true
+        val vm = newVm()
+
+        // Before runCurrent, so the startup read has not landed yet.
+        vm.onBiometricUnlockToggled(false)
+        runCurrent()
+
+        assertFalse(vm.biometricUnlock.value.enrolled)
+        assertEquals(listOf("mia"), biometricUnlock.disableCalls)
+        assertTrue(vm.biometricUnlock.value.offerable, "the device fact from the late read still applies")
+    }
 }
 
 private fun legacyAccess() = PortableVaultAccess(
@@ -394,8 +540,7 @@ private class GatedUserRepository : UserRepository {
 
     override suspend fun signup(username: String, password: String, pgpPassphrase: String): Outcome<AppUser> = unsupported()
     override suspend fun login(username: String, password: String): Outcome<AppUser> = unsupported()
-    override suspend fun bioLogin(username: String, password: String): Outcome<AppUser> = unsupported()
-    override suspend fun bioSignup(username: String, password: String): Outcome<AppUser> = unsupported()
+    override suspend fun bioLogin(username: String): Outcome<AppUser> = unsupported()
     override suspend fun logout() = unsupported()
 
     private fun unsupported(): Nothing =
@@ -413,7 +558,8 @@ private object RecordingUserPreferences : UserPreferences {
         upserted = user
     }
 
-    override suspend fun getUser(): AppUser = unsupported()
+    /** SetBiometricUnlock resolves the account it enrols from here rather than from its caller. */
+    override suspend fun getUser(): AppUser = AppUser.LoggedIn("mia", Password(hash = "h", salt = "s"))
     override suspend fun getStoredCredentials(username: String): Password? = unsupported()
     override suspend fun getUserState(): UserState? = unsupported()
     override suspend fun setUserState(state: UserState) = unsupported()
@@ -427,8 +573,7 @@ private object RecordingUserPreferences : UserPreferences {
 private object UnusedUserRepository : UserRepository {
     override suspend fun signup(username: String, password: String, pgpPassphrase: String): Outcome<AppUser> = unsupported()
     override suspend fun login(username: String, password: String): Outcome<AppUser> = unsupported()
-    override suspend fun bioLogin(username: String, password: String): Outcome<AppUser> = unsupported()
-    override suspend fun bioSignup(username: String, password: String): Outcome<AppUser> = unsupported()
+    override suspend fun bioLogin(username: String): Outcome<AppUser> = unsupported()
     override suspend fun changeUserPassword(oldPassword: String, newPassword: String): Outcome<AppUser> =
         unsupported()
 
@@ -436,4 +581,37 @@ private object UnusedUserRepository : UserRepository {
 
     private fun unsupported(): Nothing =
         throw UnsupportedOperationException("these tests only exercise the clipboard setting")
+}
+
+/**
+ * Stands in for the whole platform stack behind biometric unlock. Only the two facts the settings
+ * screen can observe are modelled — what the device can do, and whether this account is enrolled —
+ * plus the one rule the screen must respect: nothing is enrolled unless the master password is
+ * right, so [enable] can refuse.
+ */
+private class FakeBiometricUnlockRepository(
+    var availability: BiometricAvailability = BiometricAvailability.Available,
+) : BiometricUnlockRepository {
+    var enrolled = false
+    var acceptedPassword = "master"
+    val enableCalls = mutableListOf<Pair<String, String>>()
+    val disableCalls = mutableListOf<String>()
+
+    override suspend fun biometricUnlockState(username: String) =
+        BiometricUnlockState(availability = availability, enrolled = enrolled)
+
+    override suspend fun enable(username: String, password: String): Outcome<Unit> {
+        enableCalls += username to password
+        if (availability != BiometricAvailability.Available) {
+            return Outcome.Error("Biometric unlock is unavailable on this device", AuthFailure.BioAuthUnavailable)
+        }
+        if (password != acceptedPassword) return Outcome.Error("Password is incorrect", AuthFailure.InvalidPassword)
+        enrolled = true
+        return Outcome.Success(Unit)
+    }
+
+    override suspend fun disable(username: String) {
+        disableCalls += username
+        enrolled = false
+    }
 }

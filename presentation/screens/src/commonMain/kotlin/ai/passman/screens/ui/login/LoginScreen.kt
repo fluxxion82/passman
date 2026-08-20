@@ -37,14 +37,17 @@ fun LoginScreen(navController: NavController, presenter: LoginViewModel, snackba
 
     val isLoading by presenter.isLoading.collectAsState()
     val knownUsernames by presenter.knownUsernames.collectAsState()
+    val canBioAuth by presenter.canBioAuth.collectAsState()
 
     LoginContent(
         userName = presenter.username,
         password = presenter.password,
         isLoading = isLoading,
         knownUsernames = knownUsernames,
+        canBioAuth = canBioAuth,
         onUsernameChange = presenter::onUsernameChange,
         onPasswordChange = presenter::onPasswordChange,
         onLogin = presenter::onLogin,
+        onBioAuth = presenter::onBioAuth,
     )
 }

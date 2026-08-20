@@ -28,13 +28,19 @@ class LoginUser(
 
     sealed class LoginRequest {
         data class Standard(val email: String, val password: String) : LoginRequest()
-        data class BioAuth(val email: String, val password: String) : LoginRequest()
+
+        /**
+         * No password field, and that absence is the feature: the master password comes out of the
+         * account's biometric enrolment, so there is nothing for a caller to pass and no way for
+         * this path to quietly fall back to something the user typed.
+         */
+        data class BioAuth(val email: String) : LoginRequest()
     }
 
     override suspend fun invoke(param: LoginRequest): Outcome<UserState> {
         return when (
             val outcome = when (param) {
-                is LoginRequest.BioAuth -> repository.bioLogin(param.email.trim(), param.password.trim())
+                is LoginRequest.BioAuth -> repository.bioLogin(param.email.trim())
                 is LoginRequest.Standard -> repository.login(param.email.trim(), param.password.trim())
             }
         ) {

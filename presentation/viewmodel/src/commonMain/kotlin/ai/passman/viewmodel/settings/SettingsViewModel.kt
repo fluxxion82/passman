@@ -12,6 +12,10 @@ import ai.passman.domain.settings.model.PortableVaultAccess
 import ai.passman.domain.settings.model.ClipboardExpiry
 import ai.passman.domain.settings.model.ThemeMode
 import ai.passman.domain.user.ChangeUserPassword
+import ai.passman.domain.user.GetBiometricUnlockState
+import ai.passman.domain.user.SetBiometricUnlock
+import ai.passman.domain.user.models.BiometricAvailability
+import ai.passman.domain.user.models.BiometricUnlockState
 import ai.passman.domain.base.model.Outcome
 import ai.passman.viewmodel.base.BaseViewModel
 import ai.passman.viewvo.navigation.SettingsNavigation
@@ -26,6 +30,8 @@ open class SettingsViewModel(
     private val setClipboardExpiry: SetClipboardExpiry,
     private val getThemeMode: GetThemeMode,
     private val setThemeMode: SetThemeMode,
+    private val getBiometricUnlockState: GetBiometricUnlockState,
+    private val setBiometricUnlock: SetBiometricUnlock,
     private val getPortableVaultAccess: GetPortableVaultAccess? = null,
     private val copyToClipboard: CopyToClipboard? = null,
     private val upgradePortableVaultRecovery: UpgradePortableVaultRecovery? = null,
@@ -76,6 +82,32 @@ open class SettingsViewModel(
     val portableVaultAccess = MutableStateFlow<PortableVaultAccess?>(null)
     val portableVaultDialogVisible = MutableStateFlow(false)
 
+    /**
+     * Enrolment state for the signed-in account.
+     *
+     * Starts as [BiometricUnlockState.Unsupported] rather than "available but off": the startup
+     * read is suspending, and a row that appears a frame later is better than one that appears
+     * switched off on a device that turns out to have no sensor at all.
+     */
+    val biometricUnlock = MutableStateFlow(BiometricUnlockState.Unsupported)
+
+    /**
+     * Turning it ON opens this; turning it off does not.
+     *
+     * Enrolment stores a copy of the master password, so it may only happen at a moment the user
+     * has just proved they know it — which on a screen reachable from an already-unlocked session
+     * means asking again. Turning it off destroys a secret and needs no such proof.
+     */
+    val biometricPasswordDialogVisible = MutableStateFlow(false)
+    val biometricPassword = MutableStateFlow("")
+
+    /** Set while the system prompt is up. The dialog blocks on it for the same reason the
+     * change-password dialog blocks on [isChangingPassword]: leaving kills the ViewModel. */
+    val isEnrollingBiometric = MutableStateFlow(false)
+
+    /** Why the last enrolment failed, shown in the dialog rather than only as a snackbar. */
+    val biometricUnlockError = MutableStateFlow<String?>(null)
+
     /** Kept whole so toggling the flag preserves whatever duration is configured. */
     private var clipboardExpiry = ClipboardExpiry.Default
 
@@ -87,6 +119,7 @@ open class SettingsViewModel(
      */
     private var expiryChangedByUser = false
     private var themeChangedByUser = false
+    private var biometricChangedByUser = false
 
     init {
         viewModelScope.launch {
@@ -102,6 +135,23 @@ open class SettingsViewModel(
             val stored = getThemeMode()
             if (themeChangedByUser) return@launch
             themeMode.value = stored
+        }
+        refreshBiometricUnlock()
+    }
+
+    private fun refreshBiometricUnlock() {
+        viewModelScope.launch {
+            val state = getBiometricUnlockState(GetBiometricUnlockState.Request.ForSignedInUser)
+            // Same staleness rule as the clipboard toggle, but applied to half the value: only
+            // `enrolled` can be stale, because only `enrolled` is something the user may have
+            // changed while the read was in flight. Availability is a device fact they cannot
+            // touch from here — dropping it would leave the row hidden for the rest of the screen's
+            // life on the strength of one early tap.
+            biometricUnlock.value = if (biometricChangedByUser) {
+                biometricUnlock.value.copy(availability = state.availability)
+            } else {
+                state
+            }
         }
     }
 
@@ -122,6 +172,67 @@ open class SettingsViewModel(
         viewModelScope.launch {
             clipboardExpiry = clipboardExpiry.copy(enabled = enabled)
             setClipboardExpiry(clipboardExpiry)
+        }
+    }
+
+    /**
+     * The switch does not move here on the way ON, and that is deliberate: it reports enrolment,
+     * and nothing is enrolled until the password has been verified and a prompt has been answered.
+     * A switch that flipped on tap and back on failure would read as a bug.
+     */
+    fun onBiometricUnlockToggled(enabled: Boolean) {
+        biometricChangedByUser = true
+        biometricUnlockError.value = null
+        if (enabled) {
+            biometricPassword.value = ""
+            biometricPasswordDialogVisible.value = true
+            return
+        }
+        viewModelScope.launch {
+            setBiometricUnlock(SetBiometricUnlock.Request.Disable)
+            biometricUnlock.value = biometricUnlock.value.copy(enrolled = false)
+            userMessages.send("Biometric unlock turned off")
+        }
+    }
+
+    fun onBiometricPasswordChanged(password: String) {
+        biometricUnlockError.value = null
+        biometricPassword.value = password
+    }
+
+    /** Ignored while the system prompt is up — see [isEnrollingBiometric]. */
+    fun onBiometricDialogDismissed() {
+        if (isEnrollingBiometric.value) return
+        biometricPasswordDialogVisible.value = false
+        biometricPassword.value = ""
+    }
+
+    fun onBiometricEnrollConfirmed() {
+        if (isEnrollingBiometric.value) return
+        biometricUnlockError.value = null
+        isEnrollingBiometric.value = true
+        viewModelScope.launch {
+            try {
+                when (val outcome = setBiometricUnlock(SetBiometricUnlock.Request.Enable(biometricPassword.value))) {
+                    is Outcome.Success -> {
+                        biometricPasswordDialogVisible.value = false
+                        // Cleared on the way out, not on the way in: the string is the master
+                        // password and there is no reason for it to outlive the enrolment.
+                        biometricPassword.value = ""
+                        // Stated outright rather than copied onto whatever is there: enrolment only
+                        // succeeds when the device can authenticate, so a success settles both
+                        // halves — including on the startup read that has not landed yet.
+                        biometricUnlock.value = BiometricUnlockState(BiometricAvailability.Available, enrolled = true)
+                        userMessages.send("Biometric unlock turned on")
+                    }
+                    is Outcome.Error -> {
+                        biometricUnlockError.value = outcome.message
+                        userMessages.send(outcome.message)
+                    }
+                }
+            } finally {
+                isEnrollingBiometric.value = false
+            }
         }
     }
 
@@ -162,6 +273,10 @@ open class SettingsViewModel(
                         changePasswordDialogVisible.value = false
                         oldPassword.value = ""
                         newPassword.value = ""
+                        // The repository retires the biometric enrolment as part of a successful
+                        // change — the wrapped copy holds the password that was just replaced. Say
+                        // so here, or the switch keeps claiming an enrolment that no longer exists.
+                        biometricUnlock.value = biometricUnlock.value.copy(enrolled = false)
                         userMessages.send("Master password changed")
                     }
                     is Outcome.Error -> {

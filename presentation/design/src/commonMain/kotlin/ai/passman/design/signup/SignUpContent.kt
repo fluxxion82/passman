@@ -57,7 +57,6 @@ fun SignUpContent(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         var passwordVisibility by remember { mutableStateOf(false) }
-        var useBioAuth by remember { mutableStateOf(false) }
 
         Text(
             modifier = Modifier,
@@ -127,31 +126,6 @@ fun SignUpContent(
             label = { Text("Confirm password", color = MaterialTheme.colorScheme.onSurface) },
             singleLine = true,
         )
-
-//        if (canBioAuth) {
-//            Row(
-//                modifier = Modifier
-//                    .fillMaxWidth()
-//                    .padding(start = 50.dp, end = 50.dp),
-//            ) {
-//                Checkbox(
-//                    checked = useBioAuth,
-//                    onCheckedChange = {
-//                        useBioAuth = it
-//                        onBioAuth()
-//                    }
-//                )
-//
-//                Text(
-//                    modifier = Modifier.align(Alignment.CenterVertically),
-//                    text = "Use bio auth",
-//                    fontSize = 16.sp,
-//                    color = MaterialTheme.colorScheme.onSurface,
-//                    fontWeight = FontWeight.Bold,
-//                    textAlign = TextAlign.Center,
-//                )
-//            }
-//        }
 
         if (isLoading) {
             CircularProgressIndicator(

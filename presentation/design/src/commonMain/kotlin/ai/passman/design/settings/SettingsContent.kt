@@ -3,6 +3,8 @@ package ai.passman.design.settings
 import ai.passman.domain.settings.model.ThemeMode
 import ai.passman.domain.settings.model.PortableVaultAccess
 import ai.passman.domain.settings.model.PortableVaultRecoveryFormat
+import ai.passman.domain.user.models.BiometricAvailability
+import ai.passman.domain.user.models.BiometricUnlockState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -45,6 +47,7 @@ fun SettingsContent(
     syncActivityIcon: Painter,
     privacyIcon: Painter,
     clipboardIcon: Painter,
+    biometricIcon: Painter,
     themeIcon: Painter,
     oldPassword: String,
     newPassword: String,
@@ -53,6 +56,11 @@ fun SettingsContent(
     changePasswordError: String?,
     clipboardExpiryEnabled: Boolean,
     clipboardExpirySeconds: Long,
+    biometricUnlock: BiometricUnlockState,
+    biometricPasswordDialogVisible: Boolean,
+    biometricPassword: String,
+    isEnrollingBiometric: Boolean,
+    biometricUnlockError: String?,
     themeMode: ThemeMode,
     onOldPassUpdated: (String) -> Unit,
     onNewPassUpdated: (String) -> Unit,
@@ -64,6 +72,10 @@ fun SettingsContent(
     onSyncActivityClick: () -> Unit,
     onPrivacyPolicyClick: () -> Unit,
     onClipboardExpiryToggled: (Boolean) -> Unit,
+    onBiometricUnlockToggled: (Boolean) -> Unit,
+    onBiometricPasswordChanged: (String) -> Unit,
+    onBiometricDialogDismissed: () -> Unit,
+    onBiometricEnrollConfirmed: () -> Unit,
     onThemeModeSelected: (ThemeMode) -> Unit,
     portableVaultAccess: PortableVaultAccess?,
     portableVaultDialogVisible: Boolean,
@@ -133,6 +145,18 @@ fun SettingsContent(
             onCheckedChange = onClipboardExpiryToggled,
         )
 
+        // Hidden outright on hardware that has no sensor — see BiometricUnlockState.offerable. Every
+        // other state leaves the row up, because every other state is something the user can fix.
+        if (biometricUnlock.offerable) {
+            SettingsSwitch(
+                icon = biometricIcon,
+                name = "Biometric unlock",
+                summary = biometricUnlockSummary(biometricUnlock),
+                checked = biometricUnlock.enrolled,
+                onCheckedChange = onBiometricUnlockToggled,
+            )
+        }
+
         SettingsSegmented(
             icon = themeIcon,
             name = "Theme",
@@ -143,6 +167,24 @@ fun SettingsContent(
             showDivider = false,
         )
 
+        if (biometricPasswordDialogVisible) {
+            Dialog(
+                onDismissRequest = { if (!isEnrollingBiometric) onBiometricDialogDismissed() },
+                properties = DialogProperties(
+                    dismissOnBackPress = !isEnrollingBiometric,
+                    dismissOnClickOutside = !isEnrollingBiometric,
+                ),
+            ) {
+                BiometricEnrolDialog(
+                    password = biometricPassword,
+                    isEnrolling = isEnrollingBiometric,
+                    errorMessage = biometricUnlockError,
+                    onPasswordChanged = onBiometricPasswordChanged,
+                    onConfirm = onBiometricEnrollConfirmed,
+                )
+            }
+        }
+
         if (portableVaultDialogVisible && portableVaultAccess != null) {
             PortableVaultAccessDialog(
                 access = portableVaultAccess,
@@ -150,6 +192,120 @@ fun SettingsContent(
                 onCopy = onPortableVaultRecoveryCopyClicked,
                 onUpgrade = onPortableVaultRecoveryUpgradeClicked,
             )
+        }
+    }
+}
+
+/**
+ * What the row says under its title, which is the only place the user learns *why* the switch is
+ * refusing them. "Off" and "off because you deleted your fingerprints" look identical otherwise.
+ */
+private fun biometricUnlockSummary(state: BiometricUnlockState): String = when {
+    state.availability == BiometricAvailability.NotEnrolled ->
+        "Register a fingerprint or face on this device to use it here."
+    state.availability != BiometricAvailability.Available ->
+        "Your biometric sensor is unavailable right now."
+    state.enrolled ->
+        "Your master password is sealed in this device's hardware and released by your biometric. " +
+            "Changing your master password, or the biometrics registered on this device, turns it back off."
+    else ->
+        "Unlock without typing your master password. You will be asked for it once, to seal a copy " +
+            "in this device's hardware."
+}
+
+/**
+ * A single password field. It is asking for the master password again on a screen that is already
+ * inside an unlocked session, which looks redundant and is not: this is the one action that makes a
+ * *second* copy of that password, so it happens only at a moment the user has proved they know it.
+ *
+ * Blocks on [isEnrolling] exactly like the change-password dialog, and for the same reason — the
+ * system prompt is up, and walking away from this screen kills the ViewModel running it.
+ */
+@Composable
+private fun BiometricEnrolDialog(
+    password: String,
+    isEnrolling: Boolean,
+    errorMessage: String?,
+    onPasswordChanged: (String) -> Unit,
+    onConfirm: () -> Unit,
+) {
+    var passwordVisible by remember { mutableStateOf(false) }
+
+    Surface(
+        color = MaterialTheme.colorScheme.primary,
+        contentColor = MaterialTheme.colorScheme.onPrimary,
+        // Composed inside the Dialog content lambda so it captures the DIALOG's focus manager.
+        modifier = Modifier.formKeyboardNavigation(
+            onSubmit = {
+                if (!isEnrolling) {
+                    onConfirm()
+                    true
+                } else {
+                    false
+                }
+            },
+        ),
+    ) {
+        Column(
+            modifier = Modifier
+                .wrapContentHeight()
+                .fillMaxWidth()
+                .padding(16.dp),
+        ) {
+            Text("Turn on biometric unlock")
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Confirm your master password. It is sealed under a key this device's " +
+                    "hardware will only release after your biometric matches.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            TextField(
+                password,
+                enabled = !isEnrolling,
+                label = { Text("Master password", color = MaterialTheme.colorScheme.onSurface) },
+                singleLine = true,
+                visualTransformation = if (passwordVisible) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                trailingIcon = {
+                    PasswordVisibilityToggle(
+                        visible = passwordVisible,
+                        onToggle = { passwordVisible = !passwordVisible },
+                        contentDescription = "Toggle master password visibility",
+                    )
+                },
+                onValueChange = onPasswordChanged,
+            )
+
+            if (errorMessage != null && !isEnrolling) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = errorMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+
+            Row {
+                Spacer(modifier = Modifier.weight(1f))
+                PassmanPrimaryButton(
+                    enabled = !isEnrolling,
+                    onClick = onConfirm,
+                ) {
+                    if (isEnrolling) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.padding(end = 8.dp),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                    Text("Turn on", fontWeight = FontWeight.Bold)
+                }
+            }
         }
     }
 }

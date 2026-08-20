@@ -25,6 +25,8 @@ val platformModule: Module = module {
     }
 
     // UserRepository, PasswordRepository, TransferRepository, SettingsService, AppSettingsService,
-    // BioAuthService, ConnectionMonitor: intentionally not bound on iOS — repository impls are
-    // still platform-specific (JVM-only crypto, file paths) and have no iOS counterpart yet.
+    // BioAuthService, BiometricUnlockRepository, ConnectionMonitor: intentionally not bound on iOS —
+    // repository impls are still platform-specific (JVM-only crypto, file paths) and have no iOS
+    // counterpart yet. Biometric unlock in particular needs a Secure Enclave key with
+    // kSecAccessControlBiometryCurrentSet, which is the iOS port's job, not a stub's.
 }

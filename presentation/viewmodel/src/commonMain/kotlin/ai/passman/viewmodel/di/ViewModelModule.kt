@@ -27,7 +27,14 @@ import org.koin.dsl.module
 
 val viewModelModule = module {
     viewModel { SplashViewModel() }
-    viewModel { LoginViewModel(loginUser = get(), getKnownUsernames = get(), loginAttemptThrottle = get()) }
+    viewModel {
+        LoginViewModel(
+            loginUser = get(),
+            getKnownUsernames = get(),
+            loginAttemptThrottle = get(),
+            getBiometricUnlockState = get(),
+        )
+    }
     viewModel { SignUpViewModel(signUpUser = get(), validateSignUpCredentials = get()) }
     viewModel { HomeViewModel(importPgpKeys = get(), importKeystore = get(), logoutUser = get()) }
     viewModel {
@@ -65,6 +72,8 @@ val viewModelModule = module {
             setClipboardExpiry = get(),
             getThemeMode = get(),
             setThemeMode = get(),
+            getBiometricUnlockState = get(),
+            setBiometricUnlock = get(),
             getPortableVaultAccess = get(),
             copyToClipboard = get(),
             upgradePortableVaultRecovery = get(),

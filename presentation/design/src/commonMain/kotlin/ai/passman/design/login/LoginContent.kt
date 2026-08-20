@@ -47,9 +47,16 @@ fun LoginContent(
     password: String,
     isLoading: Boolean,
     knownUsernames: List<String> = emptyList(),
+    /**
+     * Only true when the account named in the field has a biometric enrolment this device can
+     * actually use. Defaulted so previews and any caller without the plumbing get the same screen
+     * as a device with no sensor.
+     */
+    canBioAuth: Boolean = false,
     onUsernameChange: (String) -> Unit,
     onPasswordChange: (String) -> Unit,
     onLogin: () -> Unit,
+    onBioAuth: () -> Unit = {},
 ) {
     var passwordVisibility by remember { mutableStateOf(false) }
     val usernameFocusRequester = remember { FocusRequester() }
@@ -233,28 +240,28 @@ fun LoginContent(
                 )
             }
 
-//            if (canBioAuth) {
-//                Button(
-//                    modifier = Modifier
-//                        .fillMaxWidth()
-//                        .padding(start = 50.dp, top = 10.dp, end = 50.dp)
-//                        .clickable(
-//                            interactionSource = remember { MutableInteractionSource() },
-//                            indication = rememberRipple(bounded = false),
-//                            onClick = {}
-//                        ),
-//                    shape = RoundedCornerShape(80),
-//                    colors = passmanButtonColors(),
-//                    onClick = onBioAuth
-//                ) {
-//                    Text(
-//                        text = "Bio Auth",
-//                        fontSize = 18.sp,
-//                        color = MaterialTheme.colorScheme.onSurface,
-//                        fontWeight = FontWeight.Bold
-//                    )
-//                }
-//            }
+            if (canBioAuth) {
+                Button(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 50.dp, top = 10.dp, end = 50.dp),
+                    shape = RoundedCornerShape(80),
+                    colors = passmanButtonColors(containerColor = MaterialTheme.colorScheme.surface),
+                    onClick = {
+                        // Same focus clear as the Login button: the system prompt takes the window,
+                        // and returning to a screen with a stale soft keyboard over it is jarring.
+                        focusManager.clearFocus()
+                        onBioAuth()
+                    },
+                ) {
+                    Text(
+                        text = "Unlock with biometrics",
+                        fontSize = 18.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
         }
     }
 }

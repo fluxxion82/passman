@@ -5,6 +5,8 @@ import ai.passman.screens.ui.SyncActivityRoute
 import ai.passman.screens.ui.TransferPasswords
 import ai.passman.screens.ui.TrustedDevicesRoute
 import ai.passman.domain.settings.model.ThemeMode
+import ai.passman.domain.user.models.BiometricAvailability
+import ai.passman.domain.user.models.BiometricUnlockState
 import ai.passman.viewvo.navigation.SettingsNavigation
 import ai.passman.viewmodel.settings.SettingsViewModel
 import androidx.compose.material3.SnackbarHostState
@@ -12,6 +14,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChangeHistory
 import androidx.compose.material.icons.filled.Brightness6
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.ImportExport
@@ -57,6 +60,11 @@ fun SettingsScreen(
     val themeMode by presenter.themeMode.collectAsState()
     val portableVaultAccess by presenter.portableVaultAccess.collectAsState()
     val portableVaultDialogVisible by presenter.portableVaultDialogVisible.collectAsState()
+    val biometricUnlock by presenter.biometricUnlock.collectAsState()
+    val biometricPasswordDialogVisible by presenter.biometricPasswordDialogVisible.collectAsState()
+    val biometricPassword by presenter.biometricPassword.collectAsState()
+    val isEnrollingBiometric by presenter.isEnrollingBiometric.collectAsState()
+    val biometricUnlockError by presenter.biometricUnlockError.collectAsState()
 
     SettingsContent(
         oldPassword = oldPass,
@@ -66,6 +74,11 @@ fun SettingsScreen(
         changePasswordError = changePasswordError,
         clipboardExpiryEnabled = clipboardExpiryEnabled,
         clipboardExpirySeconds = clipboardExpirySeconds,
+        biometricUnlock = biometricUnlock,
+        biometricPasswordDialogVisible = biometricPasswordDialogVisible,
+        biometricPassword = biometricPassword,
+        isEnrollingBiometric = isEnrollingBiometric,
+        biometricUnlockError = biometricUnlockError,
         onOldPassUpdated = presenter::onOldPasswordChanged,
         onNewPassUpdated = presenter::onNewPasswordChanged,
         onChangePasswordDialogOpened = presenter::onChangePasswordDialogOpened,
@@ -76,6 +89,7 @@ fun SettingsScreen(
         syncActivityIcon = rememberVectorPainter(image = Icons.Filled.History),
         privacyIcon = rememberVectorPainter(image = Icons.Filled.Security),
         clipboardIcon = rememberVectorPainter(image = Icons.Filled.ContentPaste),
+        biometricIcon = rememberVectorPainter(image = Icons.Filled.Fingerprint),
         themeIcon = rememberVectorPainter(image = Icons.Filled.Brightness6),
         onChangePasswordClicked = presenter::onChangePasswordClicked,
         onTransferClick = presenter::onTransferClick,
@@ -83,6 +97,10 @@ fun SettingsScreen(
         onSyncActivityClick = { navController.navigate(SyncActivityRoute) },
         onPrivacyPolicyClick = { uriHandler.openUri(PRIVACY_POLICY_URL) },
         onClipboardExpiryToggled = presenter::onClipboardExpiryToggled,
+        onBiometricUnlockToggled = presenter::onBiometricUnlockToggled,
+        onBiometricPasswordChanged = presenter::onBiometricPasswordChanged,
+        onBiometricDialogDismissed = presenter::onBiometricDialogDismissed,
+        onBiometricEnrollConfirmed = presenter::onBiometricEnrollConfirmed,
         themeMode = themeMode,
         onThemeModeSelected = { mode ->
             presenter.onThemeModeSelected(mode)
@@ -108,6 +126,11 @@ fun PreviewSettings() {
         changePasswordError = null,
         clipboardExpiryEnabled = true,
         clipboardExpirySeconds = 30,
+        biometricUnlock = BiometricUnlockState(BiometricAvailability.Available, enrolled = false),
+        biometricPasswordDialogVisible = false,
+        biometricPassword = "",
+        isEnrollingBiometric = false,
+        biometricUnlockError = null,
         onOldPassUpdated = {},
         onNewPassUpdated = {},
         onChangePasswordDialogOpened = {},
@@ -118,6 +141,7 @@ fun PreviewSettings() {
         syncActivityIcon = rememberVectorPainter(image = Icons.Filled.History),
         privacyIcon = rememberVectorPainter(image = Icons.Filled.Security),
         clipboardIcon = rememberVectorPainter(image = Icons.Filled.ContentPaste),
+        biometricIcon = rememberVectorPainter(image = Icons.Filled.Fingerprint),
         themeIcon = rememberVectorPainter(image = Icons.Filled.Brightness6),
         onChangePasswordClicked = {},
         onTransferClick = {},
@@ -125,6 +149,10 @@ fun PreviewSettings() {
         onSyncActivityClick = {},
         onPrivacyPolicyClick = {},
         onClipboardExpiryToggled = {},
+        onBiometricUnlockToggled = {},
+        onBiometricPasswordChanged = {},
+        onBiometricDialogDismissed = {},
+        onBiometricEnrollConfirmed = {},
         themeMode = ThemeMode.System,
         onThemeModeSelected = {},
         portableVaultAccess = null,

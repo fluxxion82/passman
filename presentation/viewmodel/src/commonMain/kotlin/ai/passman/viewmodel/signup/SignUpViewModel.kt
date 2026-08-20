@@ -25,7 +25,6 @@ open class SignUpViewModel(
     val username = MutableStateFlow("")
     val password = MutableStateFlow("")
     val confirmPassword = MutableStateFlow("")
-    val useBioAuth = MutableStateFlow(false)
 
     val isLoading = MutableStateFlow(false)
 
@@ -67,13 +66,12 @@ open class SignUpViewModel(
             }
 
             isLoading.value = true
-            when (
-                val outcome = if (useBioAuth.value) {
-                    signUpUser(SignUpUser.SignUpRequest.BioAuth(username.value, password.value))
-                } else {
-                    signUpUser(SignUpUser.SignUpRequest.Standard(username.value, password.value))
-                }
-            ) {
+            // No biometric variant. Biometric unlock seals a copy of the master password under a
+            // hardware key, and doing that here would mean a system prompt inside the account
+            // bootstrap's rollback contract — a prompt the user can sit on indefinitely, in the one
+            // stretch of code that must run to completion. It is a settings action on an account
+            // that already exists, where the password can be verified against something stored.
+            when (val outcome = signUpUser(SignUpUser.SignUpRequest.Standard(username.value, password.value))) {
                 is Outcome.Error -> {
                     when (outcome.cause) {
                         is AuthFailure.AccountAlreadyExists -> navigation.send(SignUpNavigation.AccountExists)
@@ -85,10 +83,6 @@ open class SignUpViewModel(
 
             isLoading.value = false
         }
-    }
-
-    fun onBioAuth() {
-        useBioAuth.value = !useBioAuth.value
     }
 
     private fun ValidateSignUpCredentials.Issue.message(): String = when (this) {

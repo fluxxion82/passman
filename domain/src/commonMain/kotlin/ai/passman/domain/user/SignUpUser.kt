@@ -28,28 +28,29 @@ class SignUpUser(
     private val ensureDefaultPgpRings: EnsureDefaultPgpRings,
     private val generatePassword: GeneratePassword,
 ) : Usecase<SignUpUser.SignUpRequest, Outcome<UserState>> {
+    /**
+     * Only one way to sign up. The biometric variant is gone: biometric unlock stores a copy of a
+     * master password under a hardware key, and doing that from inside `bootstrapAccount` would put
+     * a system prompt — which the user can sit on, or dismiss — in the middle of a rollback
+     * contract that has to run to completion. Enrolment is a settings action on an account that
+     * already exists.
+     */
     sealed class SignUpRequest {
         data class Standard(val email: String, val password: String) : SignUpRequest()
-        data class BioAuth(val email: String, val password: String) : SignUpRequest()
     }
     override suspend fun invoke(param: SignUpRequest): Outcome<UserState> {
         // Generated HERE, in signup scope, because the two places that need it cannot reach each
         // other: the repository seals the rings with it inside bootstrapAccount (before the vault
         // session binds), and the vault entry recording it can only be written after signup
-        // returns success. A bio signup creates no rings and needs no passphrase.
-        var pgpPassphrase: String? = null
+        // returns success.
+        val pgpPassphrase = generatePassword(GeneratePassword.PROVISIONED_SECRET)
         return when (
             val outcome = when (param) {
-                is SignUpRequest.BioAuth -> repository.bioSignup(param.email.trim(), param.password.trim())
-                is SignUpRequest.Standard -> {
-                    val passphrase = generatePassword(GeneratePassword.PROVISIONED_SECRET)
-                    pgpPassphrase = passphrase
-                    repository.signup(
-                        username = param.email.trim(),
-                        password = param.password.trim(),
-                        pgpPassphrase = passphrase,
-                    )
-                }
+                is SignUpRequest.Standard -> repository.signup(
+                    username = param.email.trim(),
+                    password = param.password.trim(),
+                    pgpPassphrase = pgpPassphrase,
+                )
             }
         ) {
             is Outcome.Success -> {
@@ -59,12 +60,11 @@ class SignUpUser(
                 // run concurrently. The ring record still starts immediately — until it lands, the
                 // ring passphrase exists only in this frame, and losing it makes the fresh rings
                 // unrecoverable (the use case rolls them back in that case, so the next login
-                // re-provisions); a bio signup created no rings, so it provisions the full default
-                // set instead. The starter keystore's keygen and PKCS#12 KDF work no longer queues
-                // behind either of the others; concurrent vault writes are safe because the
+                // re-provisions). The starter keystore's keygen and PKCS#12 KDF work no longer
+                // queues behind either of the others; concurrent vault writes are safe because the
                 // publish is compare-and-swap with re-apply, not last-write-wins.
                 coroutineScope {
-                    launch { pgpPassphrase?.let { recordFreshPgpRings(it) } ?: provisionDefaultPgpRings() }
+                    launch { recordFreshPgpRings(pgpPassphrase) }
                     launch { importBundledDeveloperKey() }
                     launch { ensureStarterKeystore() }
                 }
@@ -95,11 +95,6 @@ class SignUpUser(
         ensureDefaultPgpRings(EnsureDefaultPgpRings.Request.RecordFreshRings(passphrase))
     }
 
-    /** The bio-signup path: no rings were created in bootstrap, so provision the default set. */
-    private suspend fun provisionDefaultPgpRings() = nonFatal(DEFAULT_PGP_TIMEOUT) {
-        ensureDefaultPgpRings(EnsureDefaultPgpRings.Request.EnsureProvisioned)
-    }
-
     /**
      * Creating the starter keystore runs a JCA RSA keygen — slow enough on a low-end device to
      * need real headroom over the developer-key import's 5s. The cap bounds only the use case's
@@ -125,8 +120,5 @@ class SignUpUser(
         val DEVELOPER_KEY_IMPORT_TIMEOUT = 5.seconds
         val PGP_RECORD_TIMEOUT = 15.seconds
         val DEFAULT_KEYSTORE_TIMEOUT = 15.seconds
-
-        /** Bio signup provisions rings from scratch — a 4096-bit PGP keygen needs the big cap. */
-        val DEFAULT_PGP_TIMEOUT = 30.seconds
     }
 }

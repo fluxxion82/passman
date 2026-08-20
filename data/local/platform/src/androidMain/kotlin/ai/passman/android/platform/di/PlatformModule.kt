@@ -13,6 +13,7 @@ import ai.passman.platform.keyring.KeyringStore
 import ai.passman.platform.network.IpAddressProvider
 import ai.passman.platform.repository.FileTransferRepository
 import ai.passman.platform.repository.LocalPasswordRepository
+import ai.passman.platform.repository.BiometricUnlock
 import ai.passman.platform.repository.LocalUserRepository
 import ai.passman.platform.repository.PasswordEntryIdentity
 import ai.passman.android.platform.service.ActivityProvider
@@ -24,8 +25,10 @@ import ai.passman.platform.service.BioAuthService
 import ai.passman.platform.service.ExpiringClipboard
 import ai.passman.platform.di.commonPlatformModule
 import ai.passman.platform.prefs.AndroidEncryptionSettingsFactory
+import ai.passman.platform.prefs.BiometricUnlockStore
 import ai.passman.platform.prefs.EncryptionSettingsFactory
 import ai.passman.platform.prefs.impl.ExpiryAwareClipboardPreferences
+import ai.passman.platform.prefs.impl.LocalBiometricUnlockPreferences
 import ai.passman.platform.prefs.impl.LocalClipboardPreferences
 import ai.passman.platform.prefs.impl.LocalThemePreferences
 import ai.passman.platform.service.JvmKeystoreLifecycle
@@ -54,6 +57,7 @@ import ai.passman.android.platform.service.AndroidQrCodeService
 import ai.passman.domain.password.service.QrCodeService
 import ai.passman.domain.settings.service.AppSettingsService
 import ai.passman.domain.settings.service.SettingsService
+import ai.passman.domain.user.repository.BiometricUnlockRepository
 import ai.passman.domain.user.repository.UserRepository
 import com.russhwolf.settings.Settings
 import com.russhwolf.settings.SharedPreferencesSettings
@@ -62,6 +66,7 @@ import kotlinx.coroutines.SupervisorJob
 import org.koin.android.ext.koin.androidApplication
 import org.koin.android.ext.koin.androidContext
 import org.koin.dsl.bind
+import org.koin.dsl.binds
 import org.koin.dsl.module
 
 val platformModule = module {
@@ -70,7 +75,17 @@ val platformModule = module {
     single<Settings.Factory> { SharedPreferencesSettings.Factory(androidContext()) }
     single<EncryptionSettingsFactory> { AndroidEncryptionSettingsFactory(androidContext()) }
 
-    single<BioAuthService> { AndroidBioAuthService(activityProvider = get(), coroutinesContextFacade = get()) }
+    single<BioAuthService> {
+        AndroidBioAuthService(
+            context = androidContext(),
+            activityProvider = get(),
+            coroutinesContextFacade = get(),
+        )
+    }
+    single<BiometricUnlockStore> {
+        LocalBiometricUnlockPreferences(encryptedFactory = get(), coroutinesContextFacade = get())
+    }
+    single { BiometricUnlock(bioAuthService = get(), store = get()) }
     single<PasswordDatabaseStorage> { JvmPasswordDatabaseStorage(platform = get()) }
     single<KeyringRepository> { KeyringStore(platform = get()) }
     single<KeystoreLifecycle> { JvmKeystoreLifecycle(keystoreClient = get()) }
@@ -125,7 +140,10 @@ val platformModule = module {
     }
     single<ConnectionMonitor> { AndroidConnectionMonitor(context = androidContext(), contextFacade = get()) }
 
-    single<UserRepository> {
+    // Bound under both contracts because it is one object: biometric enrolment has to reach the
+    // same credential verification the login path uses, and a second instance would mean a second
+    // answer to "is this the master password".
+    single {
         LocalUserRepository(
             platform = get(),
             coroutinesContextFacade = get(),
@@ -135,12 +153,12 @@ val platformModule = module {
             storage = get(),
             passwordHasher = get(),
             secureRandom = get(),
-            bioAuthService = get(),
+            biometricUnlock = get(),
             keyringRepository = get(),
             vaultCipher = get(),
             portableVaultFormat = get(),
         )
-    }
+    } binds arrayOf(UserRepository::class, BiometricUnlockRepository::class)
     single<PasswordRepository> {
         LocalPasswordRepository(
             userPreferences = get(),

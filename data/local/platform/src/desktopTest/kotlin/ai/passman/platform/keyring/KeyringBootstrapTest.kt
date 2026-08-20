@@ -12,8 +12,11 @@ import ai.passman.keystore.KeystoreClient
 import ai.passman.keystore.LowPbePkcs12Writer
 import ai.passman.keystore.model.Keystore
 import ai.passman.platform.crypto.JvmSecureRandomService
+import ai.passman.platform.prefs.EncryptionSettingsFactory
+import ai.passman.platform.prefs.impl.LocalBiometricUnlockPreferences
+import ai.passman.platform.repository.BiometricUnlock
+import ai.passman.platform.repository.FakeBioAuthService
 import ai.passman.platform.repository.LocalUserRepository
-import ai.passman.platform.service.BioAuthService
 import ai.passman.platform.service.JvmKeystoreLifecycle
 import ai.passman.platform.service.KeystoreLifecycle
 import ai.passman.platform.service.PgpKeyRingService
@@ -30,10 +33,12 @@ import ai.passman.domain.base.model.Outcome
 import ai.passman.domain.initialization.models.UserState
 import ai.passman.domain.keystore.model.KeyStoreType
 import ai.passman.domain.keystore.model.KeystoreKeyAlgorithm
+import ai.passman.domain.user.exception.AuthFailure
 import ai.passman.domain.user.models.AppUser
 import ai.passman.domain.user.models.KdfParams
 import ai.passman.domain.user.models.Password
 import ai.passman.domain.user.repository.UserPreferences
+import com.russhwolf.settings.MapSettings
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.file.Files
@@ -115,6 +120,9 @@ class KeyringBootstrapTest {
     private lateinit var prefs: FakePreferences
     private lateinit var storage: FakeStorage
     private lateinit var pgp: FakePgpKeyRingService
+    private lateinit var bioAuth: FakeBioAuthService
+    private lateinit var biometricStore: LocalBiometricUnlockPreferences
+    private lateinit var biometricUnlock: BiometricUnlock
 
     private val user = "alice"
     private val loginPassword = "correct horse battery staple"
@@ -132,6 +140,18 @@ class KeyringBootstrapTest {
         prefs = FakePreferences()
         storage = FakeStorage()
         pgp = FakePgpKeyRingService()
+        // The sensor is faked; the enrolment store is the real one over an in-memory Settings, so
+        // "did the password change clear the enrolment?" is answered by the same code that answers
+        // it on a device.
+        bioAuth = FakeBioAuthService()
+        val biometricSettings = MapSettings()
+        biometricStore = LocalBiometricUnlockPreferences(
+            encryptedFactory = object : EncryptionSettingsFactory {
+                override fun createEncrypted(name: String) = biometricSettings
+            },
+            coroutinesContextFacade = UnconfinedFacade,
+        )
+        biometricUnlock = BiometricUnlock(bioAuthService = bioAuth, store = biometricStore)
 
         startKoin {
             modules(
@@ -660,6 +680,97 @@ class KeyringBootstrapTest {
         repository.logout()
         assertIs<Outcome.Success<AppUser>>(repository.login(user, newPassword))
         assertIs<Outcome.Error>(repository().login(user, loginPassword))
+    }
+
+    // --------------------------------------------------------- biometric unlock
+
+    /**
+     * The whole feature in one test: enrol, then sign in with **no password argument at all** and
+     * land on a fully opened account.
+     *
+     * The version this replaced could not have passed it, because its `bioLogin` took a password
+     * and refused an empty one — it was a fingerprint bolted onto a password login. Here the only
+     * password in play is the one the keystore hands back, and the vault session it produces is the
+     * same session `login` produces, which is what makes the rest of the app indifferent to how the
+     * user got in.
+     */
+    @Test
+    fun `bioLogin opens the account from the wrapped password with nothing typed`() = runBlocking<Unit> {
+        val repository = repository()
+        assertIs<Outcome.Success<AppUser>>(signup(repository))
+        assertIs<Outcome.Success<Unit>>(repository.enable(user, loginPassword))
+        assertEquals(listOf(loginPassword), bioAuth.enrolledSecrets, "the master password is what gets sealed")
+        repository.logout()
+
+        val outcome = repository().bioLogin(user)
+
+        assertIs<Outcome.Success<AppUser>>(outcome)
+        assertEquals(user, (outcome.value as AppUser.LoggedIn).userName)
+        assertTrue(canOpenStore(derivedStorePassword(loginPassword)), "the identity store is open for this session")
+    }
+
+    /**
+     * Enrolment is gated on the password, not on the caller's word for it. A settings screen sits
+     * inside an unlocked session, so without this check anyone at an unattended unlocked phone could
+     * seal *their* guess and learn nothing — but the user would then be unable to unlock, and a
+     * wrong wrapped password is an enrolment that silently never works.
+     */
+    @Test
+    fun `enabling biometric unlock with the wrong password wraps nothing`() = runBlocking<Unit> {
+        val repository = repository()
+        assertIs<Outcome.Success<AppUser>>(signup(repository))
+
+        val outcome = repository.enable(user, "not the master password")
+
+        assertIs<Outcome.Error>(outcome)
+        assertEquals(AuthFailure.InvalidPassword, outcome.cause)
+        assertTrue(bioAuth.enrolledSecrets.isEmpty(), "a rejected password must never reach the keystore")
+        assertNull(biometricStore.read(user))
+    }
+
+    /**
+     * A master-password change retires the enrolment.
+     *
+     * Two failures if it does not, and the second is the serious one. The wrapped copy holds the
+     * *old* password, so biometric unlock would start failing its credential check for no visible
+     * reason — and until the user noticed, the password they had deliberately rotated would still be
+     * recoverable from this device with a fingerprint.
+     */
+    @Test
+    fun `changing the master password clears the biometric enrolment`() = runBlocking<Unit> {
+        val repository = repository()
+        assertIs<Outcome.Success<AppUser>>(signup(repository))
+        assertIs<Outcome.Success<Unit>>(repository.enable(user, loginPassword))
+        assertTrue(repository.biometricUnlockState(user).enrolled)
+
+        val outcome = repository.changeUserPassword(loginPassword, newPassword)
+
+        assertIs<Outcome.Success<AppUser>>(outcome)
+        prefs.upsert(outcome.value)
+        assertNull(biometricStore.read(user), "the wrapped old password must not survive the change")
+        assertFalse(repository.biometricUnlockState(user).enrolled)
+        assertTrue(bioAuth.discarded.isNotEmpty(), "the hardware key goes with it")
+
+        val afterChange = repository().bioLogin(user)
+        assertIs<Outcome.Error>(afterChange)
+        assertEquals(AuthFailure.BioAuthNotSetUp, afterChange.cause)
+    }
+
+    /**
+     * A failed change leaves the enrolment alone: the old password is still the account's, so the
+     * wrapped copy is still correct and throwing it away would cost the user the feature for nothing.
+     */
+    @Test
+    fun `a rejected password change leaves the biometric enrolment intact`() = runBlocking<Unit> {
+        val repository = repository()
+        assertIs<Outcome.Success<AppUser>>(signup(repository))
+        assertIs<Outcome.Success<Unit>>(repository.enable(user, loginPassword))
+
+        val outcome = repository.changeUserPassword("not the master password", newPassword)
+
+        assertIs<Outcome.Error>(outcome)
+        assertTrue(repository.biometricUnlockState(user).enrolled)
+        assertIs<Outcome.Success<AppUser>>(repository().bioLogin(user))
     }
 
     // --------------------------- pgp ring passphrase decoupling (Task 7)
@@ -1416,7 +1527,7 @@ class KeyringBootstrapTest {
         storage = storage,
         passwordHasher = hasher,
         secureRandom = JvmSecureRandomService(),
-        bioAuthService = AlwaysAllowBioAuth,
+        biometricUnlock = biometricUnlock,
         keyringRepository = keyringRepository,
         vaultCipher = vaultCipher,
     )
@@ -1775,11 +1886,6 @@ class KeyringBootstrapTest {
         override suspend fun setUserState(state: UserState) = Unit
         override suspend fun getSessionId(): String = "keyring-bootstrap-test"
         override suspend fun clear() = Unit
-    }
-
-    private object AlwaysAllowBioAuth : BioAuthService {
-        override suspend fun authenticate(hardwareKeySeed: ByteArray?): BioAuthService.Result =
-            BioAuthService.Result.Success
     }
 
     private object UnconfinedFacade : CoroutinesContextFacade {

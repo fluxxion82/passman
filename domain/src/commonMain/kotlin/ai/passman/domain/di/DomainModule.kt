@@ -110,11 +110,13 @@ import ai.passman.domain.settings.persistence.TransferEventPersistence
 import ai.passman.domain.user.ChangeUserPassword
 import ai.passman.domain.user.GeneratePassword
 import ai.passman.domain.user.GetAppUser
+import ai.passman.domain.user.GetBiometricUnlockState
 import ai.passman.domain.user.GetKnownUsernames
 import ai.passman.domain.user.GetUserState
 import ai.passman.domain.user.LoginAttemptThrottle
 import ai.passman.domain.user.LoginUser
 import ai.passman.domain.user.LogoutUser
+import ai.passman.domain.user.SetBiometricUnlock
 import ai.passman.domain.user.SignUpUser
 import ai.passman.domain.user.UpdateExistingUser
 import ai.passman.domain.user.ValidateSignUpCredentials
@@ -310,6 +312,8 @@ val domainModule = module {
     single { LoginAttemptThrottle() }
     single { GetAppUser(userEvents = get(), userPreferences = get()) }
     single { GetKnownUsernames(userPreferences = get()) }
+    single { GetBiometricUnlockState(repository = get(), userPreferences = get()) }
+    single { SetBiometricUnlock(repository = get(), userPreferences = get()) }
     single { GetUserState(userPreferences = get(), userEvents = get()) }
     single {
         LoginUser(
