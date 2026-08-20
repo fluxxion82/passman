@@ -226,7 +226,10 @@ class LocalKeystoreRepository(
                 ),
                 keyAlias = newKeyAlias,
                 keyPassword = newKeyPassword!!,
-                algorithm = KeystoreKeyAlgorithm.RSA,
+                // The caller's choice, which this used to accept and then discard: every key added
+                // to an existing keystore came out RSA no matter what the screen offered. AES is
+                // the fallback-free default only when nothing was chosen at all.
+                algorithm = newKeyAlgo ?: KeystoreKeyAlgorithm.RSA,
             )
             if (isAdded.isSuccess) {
                 Outcome.Success(Unit)

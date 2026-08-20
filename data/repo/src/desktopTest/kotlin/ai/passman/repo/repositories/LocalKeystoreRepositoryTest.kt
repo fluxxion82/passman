@@ -117,6 +117,45 @@ class LocalKeystoreRepositoryTest {
     }
 
     @Test
+    fun updateKeystore_addsTheKeyAlgorithmTheCallerAskedFor() = runBlocking {
+        // The chosen algorithm used to be accepted and then thrown away: every key added to an
+        // existing keystore came out RSA. Read it back rather than trusting the return value —
+        // "no error" was always true here, even when the wrong key type was written.
+        repository.updateKeystore(
+            keystorePath = keystoreDir.absolutePath,
+            keystoreName = keystoreName,
+            keystorePassword = keystorePassword,
+            newKeyAlias = "added-aes",
+            newKeyPassword = "added-password",
+            newKeyAlgo = KeystoreKeyAlgorithm.AES,
+        )
+
+        // getKeystoreKey serves the alias cache, and only a load+list fills it — updateKeystore
+        // does not refresh it, so a screen that added a key without re-listing would not see it.
+        loadAliases()
+
+        val added = repository.getKeystoreKey(keystoreDir.absolutePath, keystoreName, "added-aes")
+        assertEquals(KeystoreKeyAlgorithm.AES, added.keyAlgorithm)
+    }
+
+    @Test
+    fun updateKeystore_stillAddsAnRsaKeyWhenThatIsWhatWasAsked() = runBlocking {
+        repository.updateKeystore(
+            keystorePath = keystoreDir.absolutePath,
+            keystoreName = keystoreName,
+            keystorePassword = keystorePassword,
+            newKeyAlias = "added-rsa",
+            newKeyPassword = "added-password",
+            newKeyAlgo = KeystoreKeyAlgorithm.RSA,
+        )
+
+        loadAliases()
+
+        val added = repository.getKeystoreKey(keystoreDir.absolutePath, keystoreName, "added-rsa")
+        assertEquals(KeystoreKeyAlgorithm.RSA, added.keyAlgorithm)
+    }
+
+    @Test
     fun createKeyStore_returnsTheOnDiskNameAndASingleSeparatorPath() = runBlocking {
         val outcome = repository.createKeyStore(
             ai.passman.domain.keystore.CreateKeyStore.CreateRequest(

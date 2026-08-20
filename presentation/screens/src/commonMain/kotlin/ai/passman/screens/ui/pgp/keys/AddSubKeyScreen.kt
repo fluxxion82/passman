@@ -38,9 +38,14 @@ fun AddSubKeyScreen(navController: NavController, snackbarHostState: SnackbarHos
     key?.let {
         AddSubKeyContent(
             keyPair = it,
-            algorithmItems = PgpKeyAlgorithm.entries.filterNot {
-                it == PgpKeyAlgorithm.DSA_SIGN || it == PgpKeyAlgorithm.ED25519
-            },
+            // An allowlist, not a denylist: PgpClient.addSubKey dispatches on an algorithm string
+            // and only knows these three. A new entry in PgpKeyAlgorithm used to appear here for
+            // free and then fail at the repository, so the list names what actually works.
+            algorithmItems = listOf(
+                PgpKeyAlgorithm.RSA_SIGN,
+                PgpKeyAlgorithm.RSA_ENCRYPT,
+                PgpKeyAlgorithm.ELGAMAL_ENCRYPT,
+            ),
             currentAlgorithm = currentAlgorithm,
             lengthItems = lengthOptions,
             currentLength = currentLength,

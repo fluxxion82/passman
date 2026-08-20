@@ -85,7 +85,13 @@ class PgpAddSubKeyViewModel(
                 PgpKeyAlgorithm.ELGAMAL_ENCRYPT -> lengthOptions.emit(rsaLengths)
                 PgpKeyAlgorithm.RSA_SIGN,
                 PgpKeyAlgorithm.RSA_ENCRYPT -> lengthOptions.emit(rsaLengths)
-                PgpKeyAlgorithm.ED25519 -> lengthOptions.emit(listOf("256"))
+                // The curve families are not offered on this screen at all — addSubKey cannot
+                // build them (see AddSubKeyScreen's allowlist). Listed here only because the
+                // compiler wants every branch; each falls back to a single nominal size.
+                PgpKeyAlgorithm.ED25519,
+                PgpKeyAlgorithm.ECDSA_ECDH,
+                PgpKeyAlgorithm.ED25519_X25519 -> lengthOptions.emit(listOf("256"))
+                PgpKeyAlgorithm.ED448_X448 -> lengthOptions.emit(listOf("448"))
             }
 
             lengthState.emit(lengthOptions.value.first())

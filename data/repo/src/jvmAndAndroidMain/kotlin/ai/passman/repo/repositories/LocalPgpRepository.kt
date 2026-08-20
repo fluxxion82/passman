@@ -6,6 +6,9 @@ import ai.passman.crypto.CryptoKey
 import ai.passman.crypto.io.DurableFiles
 import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.keys.model.DSA
+import ai.passman.keys.model.ECDSA
+import ai.passman.keys.model.ED25519
+import ai.passman.keys.model.ED448
 import ai.passman.keys.model.EDDSA
 import ai.passman.keys.model.ELGAMAL
 import ai.passman.keys.model.RSA
@@ -272,6 +275,9 @@ internal class LocalPgpRepository(
                     PgpKeyAlgorithm.ELGAMAL_ENCRYPT -> ELGAMAL
                     PgpKeyAlgorithm.RSA_ENCRYPT -> RSA
                     PgpKeyAlgorithm.ED25519 -> EDDSA
+                    PgpKeyAlgorithm.ECDSA_ECDH -> ECDSA
+                    PgpKeyAlgorithm.ED25519_X25519 -> ED25519
+                    PgpKeyAlgorithm.ED448_X448 -> ED448
                 }
                 val keyRingGenerator = PgpKeys.createPgpKeyRingGenerator(
                     userId = UserId(name = name, email = email, isRevoked = false).toString(),
@@ -558,7 +564,14 @@ internal class LocalPgpRepository(
                         flags = KeyFlags.ENCRYPT_COMMS or KeyFlags.ENCRYPT_STORAGE
                     )
                 }
+                // Adding a subkey to an existing ring goes through PgpClient.addSubKey, which
+                // dispatches on an algorithm *string* and only knows RSA, DSA and ElGamal. Every
+                // curve option is refused here rather than silently falling back to RSA, which is
+                // what that method's own `else` branch would do.
                 PgpKeyAlgorithm.ED25519 -> error("Ed25519 subkeys are not supported")
+                PgpKeyAlgorithm.ECDSA_ECDH -> error("ECDSA subkeys are not supported")
+                PgpKeyAlgorithm.ED25519_X25519 -> error("Ed25519/X25519 subkeys are not supported")
+                PgpKeyAlgorithm.ED448_X448 -> error("Ed448/X448 subkeys are not supported")
             }
 
             pgpClient.addSubKey(

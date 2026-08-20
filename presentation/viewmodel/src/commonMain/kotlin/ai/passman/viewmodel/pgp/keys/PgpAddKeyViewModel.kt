@@ -80,6 +80,11 @@ class PgpAddKeyViewModel(
                 PgpKeyAlgorithm.RSA_SIGN,
                 PgpKeyAlgorithm.RSA_ENCRYPT -> lengthOptions.emit(rsaLengths)
                 PgpKeyAlgorithm.ED25519 -> lengthOptions.emit(listOf("256"))
+                // The one curve family whose size is still a choice; the value picks the NIST
+                // curve. The rest have exactly one size because the curve *is* the algorithm.
+                PgpKeyAlgorithm.ECDSA_ECDH -> lengthOptions.emit(listOf("256", "384", "521"))
+                PgpKeyAlgorithm.ED25519_X25519 -> lengthOptions.emit(listOf("256"))
+                PgpKeyAlgorithm.ED448_X448 -> lengthOptions.emit(listOf("448"))
             }
 
             lengthState.emit(lengthOptions.value.first())

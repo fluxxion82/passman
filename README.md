@@ -79,6 +79,14 @@ Honest answers, because this is where sync tools usually hand-wave:
 - Deletions resurrect (see above); delete on both devices.
 - Whole-artifact transfers, no deltas.
 - Both devices must run the same build; cross-version sync is unsupported.
+- **PGP key algorithms are part of that.** Keys can be created with RSA, DSA/ElGamal, or one of the
+  elliptic-curve options (Ed25519 + Curve25519, NIST ECDSA + ECDH, Ed25519 + X25519, Ed448 + X448).
+  A build that predates an algorithm cannot read a key that uses it, so syncing PGP keys to an older
+  device will land a key it cannot use — the older device refuses it rather than importing something
+  broken. If you sync keys between devices, create them with an algorithm both builds know, or
+  update both devices first. RSA and Ed25519 + Curve25519 are the safest choices for interoperating
+  with other OpenPGP software; the RFC 9580 codepoints (Ed25519 + X25519, Ed448 + X448) are newer
+  than many implementations support.
 - Conflict resolution trusts device wall clocks.
 - LAN only, by typed IP address; the address is fixed until you re-pair.
 

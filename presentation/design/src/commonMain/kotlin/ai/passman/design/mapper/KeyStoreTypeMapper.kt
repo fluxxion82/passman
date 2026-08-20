@@ -18,8 +18,11 @@ fun KeyStoreType.toDisplayName(): String {
 fun KeyStoreType.toAllowedKeyAlgos(): List<KeystoreKeyAlgorithm> {
     return when (this) {
         KeyStoreType.ANDROID -> listOf()
-        KeyStoreType.PKCS12 -> listOf(KeystoreKeyAlgorithm.RSA)
-        KeyStoreType.BKS -> listOf(KeystoreKeyAlgorithm.RSA)
+        // PKCS#12 and BKS both hold secret keys, so an AES entry is a real option there. JKS does
+        // not — it stores private keys and certificates only, and offering AES would produce a
+        // KeyStoreException at the point of saving.
+        KeyStoreType.PKCS12 -> listOf(KeystoreKeyAlgorithm.RSA, KeystoreKeyAlgorithm.AES)
+        KeyStoreType.BKS -> listOf(KeystoreKeyAlgorithm.RSA, KeystoreKeyAlgorithm.AES)
         KeyStoreType.JKS -> listOf(KeystoreKeyAlgorithm.RSA)
     }
 }

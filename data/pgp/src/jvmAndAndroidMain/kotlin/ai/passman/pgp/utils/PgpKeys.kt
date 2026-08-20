@@ -34,6 +34,26 @@ import org.bouncycastle.pqc.jcajce.provider.BouncyCastlePQCProvider
 
 object PgpKeys {
     private const val SIG_HASH: Int = HashAlgorithmTags.SHA512
+
+    /** Key-agreement algorithms: usable as an encryption subkey, never as a ring's primary. */
+    private val ENCRYPTION_ONLY_ALGORITHMS = setOf<PGPKeyAlgo>(X25519, X448)
+
+    /**
+     * Algorithms whose primary key signs data itself rather than delegating to a signing subkey.
+     * Every EdDSA family member works this way — one signing key is the point of the curve — and
+     * ECDSA joins them because a separate ECDSA signing subkey buys nothing over the primary.
+     */
+    private val SELF_SIGNING_PRIMARIES = setOf<PGPKeyAlgo>(EDDSA, ED25519, ED448, ECDSA)
+
+    /**
+     * The NIST curve behind a requested key length. P-521 is offered as "521" because that is its
+     * real field size; anything unrecognised lands on P-256, the curve the dropdown defaults to.
+     */
+    private fun curveForLength(length: Int): ECCurve = when (length) {
+        384 -> ECCurve.NIST_P384
+        521, 512 -> ECCurve.NIST_P521
+        else -> ECCurve.NIST_P256
+    }
     private val HASH_PREFERENCES = intArrayOf(
         HashAlgorithmTags.SHA512,
         HashAlgorithmTags.SHA384,
@@ -367,43 +387,69 @@ object PgpKeys {
 
         val secretKeyEncryptor = createSecretKeyEncryptor(password.toCharArray(), s2kCount)
 
+        // An encryption-only algorithm cannot carry a ring: there would be nothing to certify the
+        // user id with. Those algorithms are valid as the *subkey* each branch below pairs in.
+        require(algorithm !in ENCRYPTION_ONLY_ALGORITHMS) {
+            "$algorithm is an encryption algorithm and cannot be a ring's primary key"
+        }
+
         val primaryAlgo = when (algorithm) {
             DSA -> DSA
-            ECDH -> TODO()
-            ECDSA -> TODO()
+            ECDH -> ECDSA
+            ECDSA -> ECDSA
             EDDSA -> EDDSA
+            ED25519 -> ED25519
+            ED448 -> ED448
             ELGAMAL -> DSA
             RSA -> RSA
+            X25519 -> X25519
+            X448 -> X448
         }
 
         val signAlgo = when (algorithm) {
             DSA -> ELGAMAL
-            ECDH -> TODO()
-            ECDSA -> TODO()
+            ECDH -> ECDSA
+            ECDSA -> ECDSA
             EDDSA -> EDDSA
+            ED25519 -> ED25519
+            ED448 -> ED448
             ELGAMAL -> ELGAMAL
             RSA -> RSA
+            X25519 -> X25519
+            X448 -> X448
         }
 
         val encryptAlgo = when (algorithm) {
             DSA -> ELGAMAL
-            ECDH -> TODO()
-            ECDSA -> TODO()
+            ECDH -> ECDH
+            ECDSA -> ECDH
             EDDSA -> ECDH
+            ED25519 -> X25519
+            ED448 -> X448
             ELGAMAL -> ELGAMAL // doesn't matter
             RSA -> RSA
+            X25519 -> X25519
+            X448 -> X448
         }
+
+        // NIST EC is the only family here whose size is still a choice, and the UI expresses that
+        // as the same "length" dropdown every other algorithm uses. Map it to a curve rather than
+        // threading a second parameter through every caller for one algorithm's benefit.
+        val curve = if (algorithm == ECDSA || algorithm == ECDH) curveForLength(length) else null
 
         // The primary key and its subkeys are independent, and at RSA-4096 each costs seconds of
         // CPU, so they are generated concurrently. runBlocking is acceptable behind this
         // synchronous API: the keygens run on Dispatchers.Default, the blocked caller thread does
         // none of the work.
         val (primaryKey, encryptionKey, signingKey) = runBlocking {
-            val primary = async(Dispatchers.Default) { createKeyPair(length, primaryAlgo) }
-            val encryption =
-                if (algorithm != DSA) async(Dispatchers.Default) { createKeyPair(length, encryptAlgo) } else null
-            val signing = if (algorithm != ELGAMAL && algorithm != EDDSA) {
-                async(Dispatchers.Default) { createKeyPair(length, signAlgo) }
+            val primary = async(Dispatchers.Default) { createKeyPair(length, primaryAlgo, curve) }
+            val encryption = if (algorithm != DSA) {
+                async(Dispatchers.Default) { createKeyPair(length, encryptAlgo, curve) }
+            } else {
+                null
+            }
+            val signing = if (algorithm != ELGAMAL && algorithm !in SELF_SIGNING_PRIMARIES) {
+                async(Dispatchers.Default) { createKeyPair(length, signAlgo, curve) }
             } else {
                 null
             }
@@ -412,7 +458,7 @@ object PgpKeys {
         val primarySubpackets = PGPSignatureSubpacketGenerator()
         primarySubpackets.setKeyFlags(
             true,
-            KeyFlags.CERTIFY_OTHER or (if (algorithm == EDDSA) KeyFlags.SIGN_DATA else 0),
+            KeyFlags.CERTIFY_OTHER or (if (algorithm in SELF_SIGNING_PRIMARIES) KeyFlags.SIGN_DATA else 0),
         )
         primarySubpackets.setPreferredHashAlgorithms(false, HASH_PREFERENCES)
         primarySubpackets.setPreferredSymmetricAlgorithms(false, SYM_PREFERENCES)
@@ -521,11 +567,7 @@ object PgpKeys {
     }
 
     fun createKeyPair(keySize:Int, keyAlgorithm: PGPKeyAlgo, curve: ECCurve? = null): PGPKeyPair {
-        if (keyAlgorithm == ECDSA) {
-            if (curve == null) {
-                throw Error("curve can not be null")
-            }
-        }
+        require(keyAlgorithm != ECDSA || curve != null) { "ECDSA needs a curve" }
 
         val algorithm: Int
         val keyGen: KeyPairGenerator
@@ -605,6 +647,30 @@ object PgpKeys {
                     BouncyCastleProvider.PROVIDER_NAME
                 )
                 algorithm = PublicKeyAlgorithmTags.EDDSA_LEGACY
+            }
+
+            // The RFC 9580 codepoints. Same underlying curves as the legacy pair above, but each
+            // algorithm carries its own tag instead of riding on EdDSA/ECDH with a curve OID
+            // inside. No initialize() call: the curve IS the algorithm, so there is no size or
+            // parameter to pick, and passing one throws.
+            ED25519 -> {
+                keyGen = KeyPairGenerator.getInstance("Ed25519", BouncyCastleProvider.PROVIDER_NAME)
+                algorithm = PublicKeyAlgorithmTags.Ed25519
+            }
+
+            X25519 -> {
+                keyGen = KeyPairGenerator.getInstance("X25519", BouncyCastleProvider.PROVIDER_NAME)
+                algorithm = PublicKeyAlgorithmTags.X25519
+            }
+
+            ED448 -> {
+                keyGen = KeyPairGenerator.getInstance("Ed448", BouncyCastleProvider.PROVIDER_NAME)
+                algorithm = PublicKeyAlgorithmTags.Ed448
+            }
+
+            X448 -> {
+                keyGen = KeyPairGenerator.getInstance("X448", BouncyCastleProvider.PROVIDER_NAME)
+                algorithm = PublicKeyAlgorithmTags.X448
             }
         }
 
