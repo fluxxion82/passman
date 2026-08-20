@@ -37,17 +37,24 @@ kotlin {
                 implementation(libs.kotlinx.coroutines.test)
             }
         }
-        getByName("desktopMain") {
+        // zxing is a JVM jar, so the QR encoder cannot live in commonMain alongside the iOS
+        // targets. This source set is the shared home for it: desktop renders the pairing QR,
+        // Android renders the same QR and additionally scans one.
+        val jvmAndAndroidMain = create("jvmAndAndroidMain") {
+            dependsOn(commonMain)
             dependencies {
-                implementation(libs.compose.foundation)
-                implementation(compose.desktop.currentOs)
-
-                // QR encode for pairing codes (QRCodeWriter). Android already declares it below
-                // for the scanner; this module has no shared jvm/android source set to hold it.
                 implementation(libs.zxing.core)
             }
         }
+        getByName("desktopMain") {
+            dependsOn(jvmAndAndroidMain)
+            dependencies {
+                implementation(libs.compose.foundation)
+                implementation(compose.desktop.currentOs)
+            }
+        }
         getByName("androidMain") {
+            dependsOn(jvmAndAndroidMain)
             dependencies {
                 // Was pinned here at 2025.04.00 while every other module used the catalog's
                 // BOM. Unifying on the catalog moves this source set forward ~14 months.
@@ -60,12 +67,11 @@ kotlin {
                 implementation(libs.androidx.activity.compose)
 
                 // Live QR scan for TOTP seeds (Android-only; desktop imports from an image).
-                // zxing below also encodes the pairing QR, which both platforms render.
+                // zxing itself comes from jvmAndAndroidMain, which also encodes the pairing QR.
                 implementation(libs.accompanist.permissions)
                 implementation(libs.androidx.camera.camera2)
                 implementation(libs.androidx.camera.lifecycle)
                 implementation(libs.androidx.camera.view)
-                implementation(libs.zxing.core)
             }
         }
     }

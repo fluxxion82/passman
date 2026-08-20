@@ -22,6 +22,7 @@ import ai.passman.domain.base.CoroutinesContextFacade
 import ai.passman.domain.base.model.Outcome
 import ai.passman.domain.connectivity.QrPairingSession
 import ai.passman.domain.connectivity.model.DeviceIdentityBundle
+import ai.passman.domain.connectivity.model.PairingQrPayload
 import ai.passman.domain.keystore.model.KeystoreEvent
 import ai.passman.domain.keystore.persistence.KeystoreEventPersistence
 import ai.passman.domain.password.model.PasswordEvent
@@ -586,7 +587,12 @@ class FileTransferRepository(
          * The plaintext pairing listener's port. Internal rather than private so the tests that
          * dial this listener read the port it actually opens — a copy of the literal in a test is a
          * copy that goes on passing after this one moves.
+         *
+         * Aliased to the domain constant rather than repeating the number: a QR advertises
+         * [PairingQrPayload.DEFAULT_PAIRING_PORT] while this is the port that actually gets bound,
+         * so two independent literals agreeing was luck, and moving one would have pointed every
+         * pairing code at a closed port with nothing failing at compile time.
          */
-        const val PAIRING_PORT = 2324
+        const val PAIRING_PORT = PairingQrPayload.DEFAULT_PAIRING_PORT
     }
 }
