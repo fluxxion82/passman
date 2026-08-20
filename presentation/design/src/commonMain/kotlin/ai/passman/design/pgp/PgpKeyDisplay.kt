@@ -2,6 +2,7 @@ package ai.passman.design.pgp
 
 import ai.passman.design.core.button.passmanButtonBorder
 import ai.passman.design.passmanColors
+import ai.passman.design.util.formatDate
 import ai.passman.domain.pgp.model.PgpKeyPair
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -31,9 +32,6 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
-import kotlin.time.Instant
-import kotlinx.datetime.TimeZone
-import kotlinx.datetime.toLocalDateTime
 
 private val tabs = mutableListOf("Primary Key", "User Ids", "Sub Keys")
 
@@ -151,9 +149,9 @@ fun PgpKeyDetails(
                 Text("Key ID: ${longToHex(pgpKeyPair.publicKey.keyId).takeLast(8)}")
                 Text("Algorithm: ${pgpKeyPair.publicKey.algorithm}")
                 Text("Bit Strength: ${pgpKeyPair.publicKey.bitStrength}")
-                Text("Creation Time: ${Instant.fromEpochMilliseconds(pgpKeyPair.publicKey.creationTime).toLocalDateTime(TimeZone.currentSystemDefault()).date}")
-                pgpKeyPair.publicKey.expirationTime?.let {
-                    Text("Expiration Time: ${Instant.fromEpochMilliseconds(pgpKeyPair.publicKey.creationTime).toLocalDateTime(TimeZone.currentSystemDefault()).date}")
+                Text("Creation Time: ${formatDate(pgpKeyPair.publicKey.creationTime)}")
+                pgpKeyPair.publicKey.expirationTime?.let { expirationTime ->
+                    Text("Expiration Time: ${formatDate(expirationTime)}")
                 }
                 // Text("User IDs: ${key.userIds.joinToString()}")
                 Spacer(modifier = Modifier.height(8.dp))
@@ -366,11 +364,9 @@ fun SubKeyDetails(
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        val creationDate = Instant.fromEpochMilliseconds(it.creationTime)
-                            .toLocalDateTime(TimeZone.currentSystemDefault())
-                            .date
+                        val creationDate = formatDate(it.creationTime)
                         val expirationText = it.expirationTime?.let { expirationTime ->
-                            "Expires ${Instant.fromEpochMilliseconds(expirationTime).toLocalDateTime(TimeZone.currentSystemDefault()).date}"
+                            "Expires ${formatDate(expirationTime)}"
                         } ?: "No expiry"
                         Text(
                             text = "Created $creationDate · $expirationText",
