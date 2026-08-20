@@ -20,19 +20,19 @@ class ValidateSignUpCredentialsTest {
     @Test
     fun `single character username is rejected`() {
         val result = validate("f", "correct-Horse-battery-9")
-        assertEquals(listOf(Issue.UsernameTooShort), result.issues)
+        assertEquals([Issue.UsernameTooShort], result.issues)
     }
 
     @Test
     fun `username surrounded by whitespace is measured trimmed`() {
         val result = validate("  ab ", "correct-Horse-battery-9")
-        assertEquals(listOf(Issue.UsernameTooShort), result.issues)
+        assertEquals([Issue.UsernameTooShort], result.issues)
     }
 
     @Test
     fun `password below twelve characters is rejected`() {
         val result = validate("mia", "elevenchars")
-        assertEquals(listOf(Issue.PasswordTooShort), result.issues)
+        assertEquals([Issue.PasswordTooShort], result.issues)
     }
 
     @Test
@@ -45,19 +45,19 @@ class ValidateSignUpCredentialsTest {
     @Test
     fun `password containing the username is rejected regardless of case`() {
         val result = validate("Sterling", "mysterlingpass99")
-        assertEquals(listOf(Issue.PasswordContainsUsername), result.issues)
+        assertEquals([Issue.PasswordContainsUsername], result.issues)
     }
 
     @Test
     fun `containment check uses the trimmed username`() {
         val result = validate(" mia ", "around-mia-padding-42")
-        assertEquals(listOf(Issue.PasswordContainsUsername), result.issues)
+        assertEquals([Issue.PasswordContainsUsername], result.issues)
     }
 
     @Test
     fun `one repeated character is rejected even when long`() {
         val result = validate("mia", "aaaaaaaaaaaaaaaa")
-        assertEquals(listOf(Issue.PasswordSingleCharacter), result.issues)
+        assertEquals([Issue.PasswordSingleCharacter], result.issues)
     }
 
     @Test

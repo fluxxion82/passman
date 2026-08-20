@@ -9,6 +9,16 @@ version = "0.0.1"
 
 kotlin {
     applyDefaultHierarchyTemplate()
+
+    // Collection literals are experimental in Kotlin 2.4 (-Xcollection-literals). Scoped to
+    // test compilations only, deliberately: production sources stay off experimental syntax.
+    targets.configureEach {
+        compilations.matching { it.name == "test" }.configureEach {
+            compileTaskProvider.configure {
+                compilerOptions.freeCompilerArgs.add("-Xcollection-literals")
+            }
+        }
+    }
     // ios()
     // Note: iosSimulatorArm64 target requires that all dependencies have M1 support
     // iosSimulatorArm64()
