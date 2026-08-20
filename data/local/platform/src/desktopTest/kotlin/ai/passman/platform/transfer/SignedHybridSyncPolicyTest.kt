@@ -16,6 +16,7 @@ import ai.passman.platform.repository.FileTransferRepository
 import ai.passman.platform.repository.PasswordEntryIdentity
 import ai.passman.platform.repository.unarmedQrPairingSession
 import ai.passman.platform.storage.JvmPasswordDatabaseStorage
+import ai.passman.platform.storage.PasswordDatabaseStorage
 import ai.passman.repo.Platform
 import ai.passman.repo.crypto.HybridKeyManager
 import ai.passman.repo.crypto.MlDsaKeyManager
@@ -50,6 +51,7 @@ import com.k2k.test.server.startServer
 import com.k2k.test.tls.K2kServerTls
 import com.russhwolf.settings.MapSettings
 import java.io.File
+import java.io.IOException
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.file.Files
@@ -276,6 +278,27 @@ class SignedHybridSyncPolicyTest {
 
         assertTrue(failure.message.orEmpty().contains("re-verification"), "refusal must name the recovery path")
         assertNothingStaged()
+    }
+
+    /**
+     * k2k answers the pushing peer `200` exactly when this call returns normally, and `500` when it
+     * throws. So a vault write that fails has to fail *here*, before the response — with the write
+     * inside a launched coroutine the peer was told its vault had landed while the write was still
+     * pending, and if it then failed the peer had already recorded a successful sync and would not
+     * send again. A silent write failure on the receiving device is indistinguishable, to the
+     * sender, from a completed sync.
+     */
+    @Test
+    fun aVaultWriteThatFailsIsReportedToThePeerInsteadOfAnsweredWithSuccess() = runBlocking<Unit> {
+        val repo = repository(
+            FakeTrustedDevices(legacySenderDevice()),
+            passwordStorage = FailingWriteStorage(storage),
+        )
+        val payload = "a vault the receiver cannot store".encodeToByteArray()
+
+        assertFailsWith<IOException> {
+            repo.processUploadedFile(EnvelopeCodec.encryptHybrid(payload, localHybridPublicKey()), STAGED, SENDER_PIN)
+        }
     }
 
     @Test
@@ -679,6 +702,13 @@ class SignedHybridSyncPolicyTest {
         syncClient(SyncTlsProvider(preferences, devices), hybridManager(devices), mlDsaManager(devices)),
     )
 
+    /** Everything the real storage does, except the one write the peer is waiting on. */
+    private class FailingWriteStorage(private val delegate: PasswordDatabaseStorage) :
+        PasswordDatabaseStorage by delegate {
+        override fun write(username: String, encryptedBytes: ByteArray): Unit =
+            throw IOException("simulated vault write failure")
+    }
+
     private fun syncClient(
         syncTls: SyncTlsProvider,
         hybrid: HybridKeyManager,
@@ -688,13 +718,14 @@ class SignedHybridSyncPolicyTest {
     private fun repository(
         devices: TrustedDevicesRepository,
         transferEvents: TransferEventPersistence = NoopTransferEvents,
+        passwordStorage: PasswordDatabaseStorage = storage,
     ) = FileTransferRepository(
         platform = platform,
         coroutineScopeFacade = ImmediateScopeFacade(),
         coroutinesContextFacade = UnconfinedContexts,
         transferEventPersistence = transferEvents,
         passwordEventPersistence = NoopPasswordEvents,
-        passwordDatabaseStorage = storage,
+        passwordDatabaseStorage = passwordStorage,
         pgpEventPersistence = NoopPgpEvents,
         keystoreEventPersistence = NoopKeystoreEvents,
         userPreferences = preferences,

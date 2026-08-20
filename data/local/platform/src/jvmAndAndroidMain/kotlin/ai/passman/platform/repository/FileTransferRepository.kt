@@ -420,23 +420,33 @@ class FileTransferRepository(
             tmpFile.writeBytes(vaultCipher.encryptVault(plaintext, sessionKey()))
             val user = userPreferences.getUser() as AppUser.LoggedIn
 
+            // Inline, NOT launched. k2k answers the peer 200 the moment this function returns
+            // normally and 500 if it throws, so anything the peer is being told succeeded has to
+            // have happened by then. With the write inside a launched coroutine the peer was told
+            // its vault had landed while the write was still pending — and if it then failed, the
+            // peer had already recorded a successful sync and would not send again.
+            //
+            // Through the storage interface, not a raw copy onto the vault path. The raw copy
+            // bypassed the write monitor, the cross-process lock, the atomic publish, the `.bak`
+            // generation and `SecureFiles.ownerOnly` — it was the one writer that falsified
+            // "every writer goes through this object", on the file whose loss is the worst
+            // outcome the product has.
+            val conflict = passwordDatabaseStorage.exists(user.userName) &&
+                passwordDatabaseStorage.read(user.userName).isNotEmpty()
+
+            if (!conflict) {
+                passwordDatabaseStorage.write(user.userName, tmpFile.readBytes())
+                tmpFile.delete()
+                KLogger.d { "processUploadedFile, auto-imported into the vault for ${user.userName}" }
+            }
+
+            // Notifications stay launched, and deliberately so: these are MutableSharedFlows with a
+            // small buffer that SUSPEND on overflow, so emitting inline would let a slow collector
+            // on the UI hold the peer's HTTP response open. A dropped notification costs a screen
+            // refresh; a dropped write costs the vault.
+            KLogger.d { "processUploadedFile, transfer event conflict=$conflict" }
             coroutineScopeFacade.transferScope.launch {
-                // Through the storage interface, not a raw copy onto the vault path. The raw copy
-                // bypassed the write monitor, the cross-process lock, the atomic publish, the `.bak`
-                // generation and `SecureFiles.ownerOnly` — it was the one writer that falsified
-                // "every writer goes through this object", on the file whose loss is the worst
-                // outcome the product has.
-                val conflict = passwordDatabaseStorage.exists(user.userName) &&
-                    passwordDatabaseStorage.read(user.userName).isNotEmpty()
-
-                if (!conflict) {
-                    passwordDatabaseStorage.write(user.userName, tmpFile.readBytes())
-                    tmpFile.delete()
-                    KLogger.d { "processUploadedFile, auto-imported into the vault for ${user.userName}" }
-                    passwordEventPersistence.update(PasswordEvent.Updated)
-                }
-
-                KLogger.d { "processUploadedFile, transfer event conflict=$conflict" }
+                if (!conflict) passwordEventPersistence.update(PasswordEvent.Updated)
                 transferEventPersistence.update(TransferEvent.PassFileReceived(conflict = conflict))
             }
         }.onFailure {
