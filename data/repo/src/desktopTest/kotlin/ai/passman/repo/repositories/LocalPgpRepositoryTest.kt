@@ -33,6 +33,7 @@ import org.bouncycastle.bcpg.S2K
 import org.bouncycastle.bcpg.SecretKeyPacket
 import org.bouncycastle.bcpg.SymmetricKeyAlgorithmTags
 import org.bouncycastle.openpgp.PGPPublicKeyRing
+import org.bouncycastle.openpgp.PGPUtil
 import org.bouncycastle.openpgp.PGPSecretKeyRing
 import org.bouncycastle.openpgp.operator.bc.BcPBESecretKeyDecryptorBuilder
 import org.bouncycastle.openpgp.operator.bc.BcPGPDigestCalculatorProvider
@@ -149,6 +150,87 @@ class LocalPgpRepositoryTest {
         val pairs = repository.getKeys()
 
         assertEquals(publicRingFile.absolutePath, pairs.single().publicKey.path)
+    }
+
+    @Test
+    fun importPgpFile_refusesAFileThatIsNotAKeyRingInsteadOfCopyingIt() = runBlocking {
+        val notAKey = File(localDir, "holiday.png").apply { writeBytes(ByteArray(64) { it.toByte() }) }
+
+        val outcome = repository.importPgpFile(notAKey.absolutePath)
+
+        assertEquals(PgpFailure.ImportKeyFailure, assertIs<Outcome.Error>(outcome).cause)
+        // The old implementation was a bare Files.copy, so this file used to land in the key
+        // directory and report success.
+        assertFalse(File(pgpUserDir, "holiday.png").exists())
+    }
+
+    @Test
+    fun importPgpFile_refusesAKeyWhoseAlgorithmThisBuildCannotRead() = runBlocking {
+        val future = File(localDir, "future_key.asc").apply {
+            writeBytes(binaryRingWithUnknownSubkey())
+        }
+
+        val outcome = repository.importPgpFile(future.absolutePath)
+
+        val cause = assertIs<PgpFailure.UnsupportedKeyAlgorithm>(assertIs<Outcome.Error>(outcome).cause)
+        assertEquals(UNKNOWN_ALGORITHM_ID, cause.algorithmId)
+        assertFalse(File(pgpUserDir, "future_key.asc").exists())
+    }
+
+    @Test
+    fun importPgpFile_stillAcceptsARealKeyRing() = runBlocking {
+        val exported = File(localDir, "friend_public.asc").apply { writeBytes(publicRingFile.readBytes()) }
+
+        val outcome = repository.importPgpFile(exported.absolutePath)
+
+        assertIs<Outcome.Success<Unit>>(outcome)
+        assertTrue(File(pgpUserDir, "friend_public.asc").exists())
+    }
+
+    @Test
+    fun getPublicKeyPath_refusesARingCarryingAnAlgorithmThisBuildCannotRead() = runBlocking {
+        // Written straight into the key directory, the way a synced ring arrives: sync unbundles
+        // raw bytes and never goes through import, so the import guard cannot have seen this file.
+        val keyId = repository.getKeys().single().publicKey.keyId
+        publicRingFile.writeBytes(binaryRingWithUnknownSubkey())
+
+        val outcome = repository.getPublicKeyPath(keyId)
+
+        val cause = assertIs<PgpFailure.UnsupportedKeyAlgorithm>(assertIs<Outcome.Error>(outcome).cause)
+        assertEquals(UNKNOWN_ALGORITHM_ID, cause.algorithmId)
+    }
+
+    @Test
+    fun getKeys_stillListsARingWithAnUnreadableAlgorithmSoItCanBeDeleted() = runBlocking {
+        val before = repository.getKeys().single().publicKey.keyId
+        publicRingFile.writeBytes(binaryRingWithUnknownSubkey())
+
+        // Refusing to LIST it would leave the user no way to remove it — delete resolves the file
+        // through the same listing. Sharing it is what gets refused, not seeing it.
+        assertEquals(before, repository.getKeys().single().publicKey.keyId)
+    }
+
+    /**
+     * The test ring, in binary, with one extra public-subkey packet using an algorithm id nobody
+     * assigns today (35 is ML-KEM in the RFC 9580 registry). BouncyCastle drops that subkey
+     * silently and reports the ring as whole, which is exactly the case the guard exists for.
+     *
+     * Binary rather than armored on purpose: bytes appended AFTER an armor block are invisible,
+     * since the dearmorer stops at the tail line. A ring doctored that way would prove nothing.
+     */
+    private fun binaryRingWithUnknownSubkey(): ByteArray {
+        val ring = PGPUtil.getDecoderStream(publicRingFile.inputStream()).use { it.readBytes() }
+        return ring + unknownAlgorithmSubkeyPacket()
+    }
+
+    private fun unknownAlgorithmSubkeyPacket(): ByteArray {
+        val body = mutableListOf<Byte>()
+        body += 4 // version
+        repeat(4) { body += 0x00 } // creation time
+        body += UNKNOWN_ALGORITHM_ID.toByte()
+        repeat(32) { body += 0x2A } // stand-in key material
+        val header = (0x80 or (14 shl 2)).toByte() // old format, public subkey, one-byte length
+        return byteArrayOf(header, body.size.toByte()) + body.toByteArray()
     }
 
     @Test
@@ -509,4 +591,9 @@ class LocalPgpRepositoryTest {
             otherGenerator.generateSecretKeyRing().encode(out)
         }
     }
+
+    private companion object {
+        const val UNKNOWN_ALGORITHM_ID = 35
+    }
+
 }

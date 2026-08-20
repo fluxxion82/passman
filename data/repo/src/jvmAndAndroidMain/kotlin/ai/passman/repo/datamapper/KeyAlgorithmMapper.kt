@@ -16,8 +16,10 @@ fun Int.toAlgorithm(): String {
         26 -> "X448"
         27 -> "Ed25519"
         28 -> "Ed448"
-        in 100..110 -> "EXPERIMENTAL"
-        else -> "Unknown"
+        in 100..110 -> "EXPERIMENTAL ($this)"
+        // Keep the id. A key from a newer implementation renders here, and "Unknown" alone leaves
+        // the user with nothing to search for; "Unknown (35)" is an answer.
+        else -> "Unknown ($this)"
     }
 }
 

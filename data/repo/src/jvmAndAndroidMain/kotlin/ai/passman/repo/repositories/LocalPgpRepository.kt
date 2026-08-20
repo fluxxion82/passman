@@ -10,7 +10,9 @@ import ai.passman.keys.model.ELGAMAL
 import ai.passman.keys.model.RSA
 import ai.passman.pgp.bundled.BundledDeveloperKey
 import ai.passman.pgp.service.PgpClient
+import ai.passman.pgp.utils.PgpKeyRingSupport
 import ai.passman.pgp.utils.PgpKeys
+import ai.passman.pgp.utils.inspectKeyRingSupport
 import ai.passman.platform.transfer.DirectoryBundler
 import ai.passman.platform.transfer.PgpTransferService
 import ai.passman.repo.Platform
@@ -104,7 +106,19 @@ internal class LocalPgpRepository(
             val secretPaths = entries.filter { it.key.type == PgpKeyType.Secret }.map { it.key.path }.toSet()
             entries
                 .firstOrNull { it.fromPublicRing && it.key.keyId == keyId && it.key.path !in secretPaths }
-                ?.let { Outcome.Success(it.key.path) }
+                ?.let { entry ->
+                    // A ring carrying an algorithm this build cannot read is not the ring it
+                    // appears to be: BouncyCastle drops an unknown v4 subkey along with every
+                    // subkey after it, so what we would hand out is a silently truncated key.
+                    when (val support = supportOf(entry.key.path)) {
+                        is PgpKeyRingSupport.UnsupportedAlgorithm -> Outcome.Error(
+                            "this key uses algorithm ${support.algorithmId}, which this version cannot read",
+                            PgpFailure.UnsupportedKeyAlgorithm(support.algorithmId),
+                        )
+
+                        else -> Outcome.Success(entry.key.path)
+                    }
+                }
                 ?: Outcome.Error("no public key ring file for key", PgpFailure.SharePublicKeyFailure)
         }.onFailure {
             if (it is CancellationException) throw it
@@ -135,6 +149,13 @@ internal class LocalPgpRepository(
                         KLogger.e { "getSecretKeyPath: ${file.name} is not a standalone secret ring for the key; skipping" }
                         refusedSharedFile = true
                         continue
+                    }
+                    val support = supportOf(file.absolutePath)
+                    if (support is PgpKeyRingSupport.UnsupportedAlgorithm) {
+                        return@withContext Outcome.Error(
+                            "this key uses algorithm ${support.algorithmId}, which this version cannot read",
+                            PgpFailure.UnsupportedKeyAlgorithm(support.algorithmId),
+                        )
                     }
                     return@withContext verifyPassphraseUnlocks(file, keyId, passphrase)
                 }
@@ -608,6 +629,25 @@ internal class LocalPgpRepository(
             val destinationPath = "$pgpDir${user.userName}${File.separator}${source.fileName}"
             val destination = Paths.get(destinationPath)
 
+            // Import used to be a bare file copy: anything the picker returned landed in the key
+            // directory and "succeeded", then vanished from the listing because it never parsed.
+            // Decide before writing, and say why when the answer is no.
+            when (val support = FileInputStream(source.toFile()).use { inspectKeyRingSupport(it) }) {
+                is PgpKeyRingSupport.NotAKeyRing ->
+                    return@runCatching Outcome.Error(
+                        "that file is not an OpenPGP key ring",
+                        PgpFailure.ImportKeyFailure,
+                    )
+
+                is PgpKeyRingSupport.UnsupportedAlgorithm ->
+                    return@runCatching Outcome.Error(
+                        "this key uses algorithm ${support.algorithmId}, which this version cannot read",
+                        PgpFailure.UnsupportedKeyAlgorithm(support.algorithmId),
+                    )
+
+                is PgpKeyRingSupport.Supported -> Unit
+            }
+
             // The per-user dir otherwise only exists once key generation has run; importing
             // into a fresh account must not depend on that.
             destination.parent?.let { Files.createDirectories(it) }
@@ -714,6 +754,10 @@ internal class LocalPgpRepository(
      * secret-key packet or additional ring disqualifies the whole blob.
      */
     private fun soleImportablePublicRingFingerprint(armorBytes: ByteArray): String? {
+        // "Exactly one public ring" says nothing about what is inside it, and BouncyCastle reports
+        // a ring whose unknown subkeys it dropped as perfectly well-formed. Refuse first.
+        if (inspectKeyRingSupport(armorBytes) !is PgpKeyRingSupport.Supported) return null
+
         // A parse failure anywhere propagates: a blob whose tail cannot be parsed must not be
         // accepted on the strength of a valid-looking prefix (the whole armor is what gets written).
         val objects = ByteArrayInputStream(armorBytes).use { stream ->
@@ -872,6 +916,18 @@ internal class LocalPgpRepository(
      * whose path points at the secret file and must never win the listing over a real public ring.
      */
     private data class RingEntry(val key: PgpKey, val fromPublicRing: Boolean)
+
+    /**
+     * Whether every key in the file at [filePath] uses an algorithm this build can read.
+     *
+     * Read at the point of use rather than cached on [PgpKey]: files arrive by sync as raw bytes
+     * without passing through import, so the listing is not a reliable place to have decided this.
+     * An unreadable file answers [PgpKeyRingSupport.NotAKeyRing], which callers treat as "no
+     * objection" — they have their own handling for a file that will not parse.
+     */
+    private fun supportOf(filePath: String): PgpKeyRingSupport =
+        runCatching { FileInputStream(filePath).use { inspectKeyRingSupport(it) } }
+            .getOrElse { PgpKeyRingSupport.NotAKeyRing }
 
     private fun processKeyRing(filePath: String, fileName: String): List<RingEntry> {
         val result = mutableListOf<RingEntry>()
