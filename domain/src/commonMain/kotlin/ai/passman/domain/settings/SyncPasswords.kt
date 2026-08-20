@@ -3,6 +3,7 @@ package ai.passman.domain.settings
 import ai.passman.domain.base.model.Outcome
 import ai.passman.domain.base.model.isSuccessful
 import ai.passman.domain.connectivity.model.SyncOps
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.domain.connectivity.repository.TrustedDevicesRepository
 import ai.passman.domain.connectivity.service.FingerprintService
 import ai.passman.domain.connectivity.verifyTrustedFingerprint
@@ -47,15 +48,15 @@ class SyncPasswords(
      */
     internal val clock: Clock = Clock.System,
 ) {
-    operator fun invoke(host: String): Flow<SyncSessionState> = runSyncSession(
-        host = host,
+    operator fun invoke(device: TrustedDevice): Flow<SyncSessionState> = runSyncSession(
+        device = device,
         trustedDevices = trustedDevices,
         fingerprintService = fingerprintService,
         transferRepository = transferRepository,
         clock = clock,
-        push = { passwordRepository.pushPasswordDatabase(host) },
-        pull = { passwordRepository.pullPasswordDatabase(host) },
-    ).recordingOutcomes(SyncOps.PASSWORDS, host, recordSyncOutcome) {
+        push = { paired -> passwordRepository.pushPasswordDatabase(paired) },
+        pull = { paired -> passwordRepository.pullPasswordDatabase(paired) },
+    ).recordingOutcomes(SyncOps.PASSWORDS, device, recordSyncOutcome) {
         passwordEventPersistence.update(PasswordEvent.Updated)
     }
 }
@@ -77,15 +78,15 @@ class SyncPgpKeys(
      */
     internal val clock: Clock = Clock.System,
 ) {
-    operator fun invoke(host: String): Flow<SyncSessionState> = runSyncSession(
-        host = host,
+    operator fun invoke(device: TrustedDevice): Flow<SyncSessionState> = runSyncSession(
+        device = device,
         trustedDevices = trustedDevices,
         fingerprintService = fingerprintService,
         transferRepository = transferRepository,
         clock = clock,
-        push = { pgpRepository.pushPgpKeys(host) },
-        pull = { pgpRepository.pullPgpKeys(host) },
-    ).recordingOutcomes(SyncOps.PGP, host, recordSyncOutcome) {
+        push = { paired -> pgpRepository.pushPgpKeys(paired) },
+        pull = { paired -> pgpRepository.pullPgpKeys(paired) },
+    ).recordingOutcomes(SyncOps.PGP, device, recordSyncOutcome) {
         pgpEventPersistence.update(PgpEvent.KeyModified)
     }
 }
@@ -107,21 +108,26 @@ class SyncKeystores(
      */
     internal val clock: Clock = Clock.System,
 ) {
-    operator fun invoke(host: String): Flow<SyncSessionState> = runSyncSession(
-        host = host,
+    operator fun invoke(device: TrustedDevice): Flow<SyncSessionState> = runSyncSession(
+        device = device,
         trustedDevices = trustedDevices,
         fingerprintService = fingerprintService,
         transferRepository = transferRepository,
         clock = clock,
-        push = { keystoreRepository.pushKeystores(host) },
-        pull = { keystoreRepository.pullKeystores(host) },
-    ).recordingOutcomes(SyncOps.KEYSTORE, host, recordSyncOutcome) {
+        push = { paired -> keystoreRepository.pushKeystores(paired) },
+        pull = { paired -> keystoreRepository.pullKeystores(paired) },
+    ).recordingOutcomes(SyncOps.KEYSTORE, device, recordSyncOutcome) {
         keystoreEventPersistence.update(KeystoreEvent.Updated)
     }
 }
 
 /**
  * Wraps [runSyncSession]'s flow with sync-log recording, shared by all three wrappers above.
+ *
+ * [device] rather than a bare host: the log row names a device, and resolving that name from an
+ * address at recording time is the same first-match lookup that could name the wrong pairing
+ * everywhere else on this path. The session already holds the record the user chose, so the row is
+ * written from it directly.
  *
  * [onEach] alone is not the real shape of cancellation: it only fires on an *emission*, but a real
  * cancellation — `syncJob?.cancel()` on the collecting coroutine, the way every Home ViewModel
@@ -143,7 +149,7 @@ class SyncKeystores(
  */
 private fun Flow<SyncSessionState>.recordingOutcomes(
     artifact: String,
-    host: String,
+    device: TrustedDevice,
     recordSyncOutcome: RecordSyncOutcome,
     onSuccess: suspend () -> Unit,
 ): Flow<SyncSessionState> {
@@ -159,14 +165,19 @@ private fun Flow<SyncSessionState>.recordingOutcomes(
             onSuccess()
         }
         if (state is SyncSessionState.Success || state is SyncSessionState.Error) {
-            withContext(NonCancellable) { recordSyncOutcome.recordTerminalState(artifact, host, state) }
+            withContext(NonCancellable) { recordSyncOutcome.recordTerminalState(artifact, device, state) }
             terminalRecorded = true
         }
     }.onCompletion { cause ->
         if (cause is CancellationException && !terminalRecorded) {
             withContext(NonCancellable) {
                 recordSyncOutcome(
-                    RecordSyncOutcome.Params(artifact = artifact, host = host, outcome = SyncLogEntry.OUTCOME_CANCELLED),
+                    RecordSyncOutcome.Params(
+                        artifact = artifact,
+                        host = device.lastHost,
+                        deviceName = device.name,
+                        outcome = SyncLogEntry.OUTCOME_CANCELLED,
+                    ),
                 )
             }
         }
@@ -198,18 +209,24 @@ private fun Flow<SyncSessionState>.recordingOutcomes(
  */
 private suspend fun RecordSyncOutcome.recordTerminalState(
     artifact: String,
-    host: String,
+    device: TrustedDevice,
     state: SyncSessionState,
 ) {
     when (state) {
         is SyncSessionState.Success -> invoke(
-            RecordSyncOutcome.Params(artifact = artifact, host = host, outcome = SyncLogEntry.OUTCOME_SUCCESS),
+            RecordSyncOutcome.Params(
+                artifact = artifact,
+                host = device.lastHost,
+                deviceName = device.name,
+                outcome = SyncLogEntry.OUTCOME_SUCCESS,
+            ),
         )
 
         is SyncSessionState.Error -> invoke(
             RecordSyncOutcome.Params(
                 artifact = artifact,
-                host = host,
+                host = device.lastHost,
+                deviceName = device.name,
                 outcome = if (state.failure is TransferFailure.SyncCancelled) {
                     SyncLogEntry.OUTCOME_CANCELLED
                 } else {
@@ -253,7 +270,7 @@ private fun retryDelayMs(clock: Clock, deadlineMs: Long): Long =
  * lease to release (see step 2 below).
  *
  * Lifecycle:
- *  1. Verify peer fingerprint against any paired TrustedDevice. Mismatch -> emit Error and stop.
+ *  1. Verify [device] is still paired, by name. Unpaired -> emit Error and stop.
  *     No lease has been taken yet, so `onCompletion` must not release one either.
  *  2. Start receive server. [TransferRepository.startTransferServer] is refcounted and now throws
  *     on a failed bind instead of swallowing it (see its KDoc); a lease is held if and only if
@@ -274,7 +291,7 @@ private fun retryDelayMs(clock: Clock, deadlineMs: Long): Long =
  *     retried pull only ever calls `pull()` again, never `push()` - re-running the push would
  *     re-enter the peer's `processUploadedFile`, stage a second temp file and flip on a spurious
  *     conflict that sends the peer to its Reconcile screen for data that already arrived once.
- *  5. On success -> emit Success and stamp the trusted device's last-synced time.
+ *  5. On success -> emit Success and stamp [device]'s last-synced time, by name.
  *  6. If the shared deadline runs out before success, the terminal message has to say which of two
  *     different things happened - see the timeout branch below.
  *  7. Phase B: hold the receive server open until the 60s deadline so the *slower* peer (who
@@ -284,17 +301,26 @@ private fun retryDelayMs(clock: Clock, deadlineMs: Long): Long =
  *  8. onCompletion: release the lease taken in step 2, if any (covers success, error,
  *     cancellation, and timeout).
  *
+ * [device] is the whole record the user chose in the sync-target chooser, not just its address.
+ * [TrustedDevice] has no id — [TrustedDevice.name] is its identity key — and nothing keeps two
+ * pairings from sharing a [TrustedDevice.lastHost]: `add` dedupes by name, `updateHost` repoints by
+ * name with no collision check, and re-pairing one physical peer under a new name leaves two
+ * records with the same host and the same fingerprint. Every consumer that used to re-derive the
+ * device from the address (this session's last-sync stamp, the transport's SPKI pin, the sync log's
+ * device name) was therefore a first-match lookup that could answer with a different record than
+ * the one the user tapped. Carrying the record itself is what makes all of them agree.
+ *
  * [clock] defaults to the system clock in production; tests inject a clock driven by the
  * coroutine test scheduler so the retry ticks, the elapsed counter and the 60s deadline all
  * agree with virtual time.
  */
 internal fun runSyncSession(
-    host: String,
+    device: TrustedDevice,
     trustedDevices: TrustedDevicesRepository,
     fingerprintService: FingerprintService,
     transferRepository: TransferRepository,
-    push: suspend () -> Outcome<Unit>,
-    pull: suspend () -> Outcome<Unit>,
+    push: suspend (TrustedDevice) -> Outcome<Unit>,
+    pull: suspend (TrustedDevice) -> Outcome<Unit>,
     clock: Clock = Clock.System,
 ): Flow<SyncSessionState> {
     // The refcounted server's contract is "a lease is held if and only if startTransferServer()
@@ -321,15 +347,25 @@ internal fun runSyncSession(
     // redundant.
     var started = false
 
+    // The address to talk to is a property of the chosen record, never a separate parameter that
+    // could disagree with it. Read once here so every state this flow emits, every retry and the
+    // final stamp all name the same address as the pin the transport is about to use.
+    val host = device.lastHost
+
     return flow {
         emit(SyncSessionState.Idle)
 
-        val verify = verifyTrustedFingerprint(host, trustedDevices, fingerprintService)
+        val verify = verifyTrustedFingerprint(device, trustedDevices, fingerprintService)
         if (!verify.isSuccessful()) {
             val err = verify as Outcome.Error
             emit(SyncSessionState.Error(err.cause, err.message))
             return@flow
         }
+        // The stored record, not the one the chooser handed us. Everything downstream dispatches on
+        // `pairingSecurity` and pins `fingerprint`, and both can have moved on since the dialog was
+        // populated - a pairing marked for re-verification in between must refuse this session, not
+        // run it on the copy that predates the mark.
+        val paired = (verify as Outcome.Success<TrustedDevice>).value
 
         try {
             // NonCancellable, not a plain suspend call: withContext still checks
@@ -372,7 +408,7 @@ internal fun runSyncSession(
         // successful push. A second, pull-only deadline would let a session run up to 120s end to end.
         while (!sessionSucceeded && clock.now().toEpochMilliseconds() < deadlineMs) {
             if (!pushSucceeded) {
-                when (val attempt = push()) {
+                when (val attempt = push(paired)) {
                     is Outcome.Success -> {
                         pushSucceeded = true
                         emit(SyncSessionState.Syncing(host))
@@ -395,14 +431,18 @@ internal fun runSyncSession(
             }
 
             // pushSucceeded is true here, either from this iteration or a previous pull retry.
-            when (val pullAttempt = pull()) {
+            when (val pullAttempt = pull(paired)) {
                 is Outcome.Success -> {
                     emit(SyncSessionState.Success(host))
                     // The chooser sorts by lastSyncedAt; stamping here is what keeps its
                     // top row and the fast path pointing at the device that actually works.
-                    trustedDevices.getByHost(host)?.let { device ->
-                        trustedDevices.updateLastSync(device.name, host, clock.now().toEpochMilliseconds())
-                    }
+                    //
+                    // Stamped by the name of the record this session was *given*, with no lookup in
+                    // between. Re-deriving the device from `host` here used to be a first match on
+                    // an address that two pairings can legitimately share, so the "Just now" could
+                    // land on a device the user never tapped while the one they did tap kept
+                    // reading "Never synced" — and the chooser would then sort the wrong row first.
+                    trustedDevices.updateLastSync(paired.name, host, clock.now().toEpochMilliseconds())
                     sessionSucceeded = true
                 }
                 is Outcome.Error -> {

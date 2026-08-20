@@ -5,6 +5,7 @@ import ai.passman.crypto.CryptoService
 import ai.passman.crypto.vault.PasswordVaultCipher
 import ai.passman.crypto.vault.VaultSession
 import ai.passman.crypto.vault.VaultSessionKey
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.platform.crypto.JvmSha256Service
 import ai.passman.platform.storage.PasswordDatabaseStorage
 import ai.passman.platform.transfer.PasswordTransferService
@@ -105,7 +106,13 @@ class LocalPasswordRepositoryNoWipeTest {
 
     private class FakeTransfer(private val pullBytes: ByteArray = ByteArray(0)) : PasswordTransferService {
         override suspend fun transferDatabaseBytes(decryptedDatabaseBytes: ByteArray, fileName: String, hostName: String, port: Int) = Outcome.Success(Unit)
-        override suspend fun pullDatabase(hostName: String, port: Int) = Outcome.Success(pullBytes)
+        override suspend fun transferDatabaseBytes(
+            decryptedDatabaseBytes: ByteArray,
+            fileName: String,
+            device: TrustedDevice,
+            port: Int,
+        ) = Outcome.Success(Unit)
+        override suspend fun pullDatabase(device: TrustedDevice, port: Int) = Outcome.Success(pullBytes)
     }
 
     @BeforeTest
@@ -199,7 +206,7 @@ class LocalPasswordRepositoryNoWipeTest {
             storage = storage,
             crypto = FakeCrypto(),
             transferService = FakeTransfer("not json".encodeToByteArray()),
-        ).pullPasswordDatabase("peer")
+        ).pullPasswordDatabase(peerDevice("peer"))
 
         assertTrue(outcome is Outcome.Error)
         assertEquals(0, storage.writeCount)

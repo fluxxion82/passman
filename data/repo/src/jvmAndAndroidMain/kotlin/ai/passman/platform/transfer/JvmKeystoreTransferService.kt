@@ -1,6 +1,7 @@
 package ai.passman.platform.transfer
 
 import ai.passman.domain.base.model.Outcome
+import ai.passman.domain.connectivity.model.TrustedDevice
 
 /**
  * Keystore-bundle push/pull under the same per-device policy as `JvmPasswordTransferService`, shared
@@ -13,12 +14,12 @@ class JvmKeystoreTransferService(
     override suspend fun transferKeystoreBundle(
         decryptedBundleBytes: ByteArray,
         fileName: String,
-        hostName: String,
+        device: TrustedDevice,
         port: Int,
-    ): Outcome<Unit> = client.push(SyncArtifact.Keystore, decryptedBundleBytes, fileName, hostName, port)
+    ): Outcome<Unit> = client.push(SyncArtifact.Keystore, decryptedBundleBytes, fileName, device, port)
 
     override suspend fun pullKeystoreBundle(
-        hostName: String,
+        device: TrustedDevice,
         port: Int,
-    ): Outcome<ByteArray> = client.pull(SyncArtifact.Keystore, hostName, port)
+    ): Outcome<ByteArray> = client.pull(SyncArtifact.Keystore, device, port)
 }

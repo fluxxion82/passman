@@ -1,6 +1,7 @@
 package ai.passman.domain.pgp
 
 import ai.passman.domain.base.model.Outcome
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.domain.pgp.model.PgpKeyAlgorithm
 import ai.passman.domain.pgp.model.PgpKeyPair
 import ai.passman.domain.pgp.model.SubKeyAction
@@ -29,8 +30,8 @@ class FakePgpRepository(
     private val createDefaultRings: suspend (passphrase: String) -> Outcome<Unit> =
         { unsupported("createDefaultKeyRings") },
     private val deleteDefaultRings: () -> Outcome<Unit> = { unsupported("deleteDefaultKeyRings") },
-    private val push: suspend (String) -> Outcome<Unit> = { unsupported("pushPgpKeys") },
-    private val pull: suspend (String) -> Outcome<Unit> = { unsupported("pullPgpKeys") },
+    private val push: suspend (TrustedDevice) -> Outcome<Unit> = { unsupported("pushPgpKeys") },
+    private val pull: suspend (TrustedDevice) -> Outcome<Unit> = { unsupported("pullPgpKeys") },
 ) : PgpRepository {
 
     val encryptCalls = mutableListOf<Pair<String, String>>()
@@ -187,9 +188,9 @@ class FakePgpRepository(
         return deleteDefaultRings()
     }
 
-    override suspend fun transferPgpKeys(hostName: String): Outcome<Unit> = unsupported("transferPgpKeys")
-    override suspend fun pushPgpKeys(hostName: String): Outcome<Unit> = push(hostName)
-    override suspend fun pullPgpKeys(hostName: String): Outcome<Unit> = pull(hostName)
+    override suspend fun transferPgpKeys(device: TrustedDevice): Outcome<Unit> = unsupported("transferPgpKeys")
+    override suspend fun pushPgpKeys(device: TrustedDevice): Outcome<Unit> = push(device)
+    override suspend fun pullPgpKeys(device: TrustedDevice): Outcome<Unit> = pull(device)
 
     companion object {
         private fun unsupported(name: String): Nothing =

@@ -7,6 +7,7 @@ import ai.passman.repo.crypto.MlDsaKeyManager
 import ai.passman.repo.tls.SyncTlsProvider
 import ai.passman.domain.base.model.Outcome
 import ai.passman.domain.connectivity.model.PairingSecurity
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.domain.settings.exception.TransferFailure
 import com.k2k.test.tls.K2kClientTls
 import java.net.ConnectException
@@ -113,6 +114,19 @@ interface SyncNetwork {
 }
 
 /**
+ * A typed address that resolves to no pairing — or to more than one, which is the same answer as far
+ * as this client is concerned.
+ *
+ * One message for both because it reaches the manual-transfer screen verbatim, and "host not paired"
+ * would be a lie in the second case: the peer *is* paired, twice over, and picking one of the two
+ * would pin an arbitrary SPKI (see `TrustedDevicesRepository.getByHost` for how one address ends up
+ * with two claimants). The way out of either case is the same — pair the peer, or start the sync
+ * from the chooser, which carries the record itself and never has to resolve an address at all.
+ */
+private fun unresolvedHostMessage(host: String): String =
+    "no single paired device at $host - pair it, or pick the device from the sync chooser"
+
+/**
  * Push/pull of one sync artifact, dispatched on the target device's [PairingSecurity]:
  *
  * - `LegacyRsa` keeps today's behaviour exactly — peer keys are fetched over the mTLS channel each
@@ -135,15 +149,39 @@ class ArtifactSyncClient(
     private val mlDsaKeyManager: MlDsaKeyManager,
     private val network: SyncNetwork = SyncNetwork.K2k,
 ) {
+    /**
+     * Push to a **typed** address: resolves it to the single pairing that claims it (an ambiguous
+     * address resolves to nothing — see
+     * [ai.passman.domain.connectivity.repository.TrustedDevicesRepository.getByHost]) and then runs
+     * the device-taking overload below. Only the manual-address path should reach this; a sync
+     * session already holds the record the user chose and must pass it.
+     */
     suspend fun push(
         artifact: SyncArtifact,
         plaintext: ByteArray,
         fileName: String,
         hostName: String,
         port: Int,
-    ): Outcome<Unit> = runCatching {
+    ): Outcome<Unit> {
         val device = syncTlsProvider.deviceForHost(hostName)
-            ?: return Outcome.Error("host not paired: $hostName", TransferFailure.GeneralTransferFailure)
+            ?: return Outcome.Error(unresolvedHostMessage(hostName), TransferFailure.GeneralTransferFailure)
+        return push(artifact, plaintext, fileName, device, port)
+    }
+
+    /**
+     * Push to [device] — the record the user chose, carried the whole way rather than re-derived
+     * from an address. Everything below pins [device]'s own SPKI and reads [device]'s own stored
+     * peer keys, so the pairing that gets pinned is always the pairing that was picked, even when a
+     * second record shares its [TrustedDevice.lastHost].
+     */
+    suspend fun push(
+        artifact: SyncArtifact,
+        plaintext: ByteArray,
+        fileName: String,
+        device: TrustedDevice,
+        port: Int,
+    ): Outcome<Unit> = runCatching {
+        val hostName = device.lastHost
         when (device.pairingSecurity) {
             PairingSecurity.AwaitingConfirmation -> Outcome.Error(
                 StoredPeerKeys.reverificationRefusal(device.name),
@@ -151,7 +189,7 @@ class ArtifactSyncClient(
             )
 
             PairingSecurity.LegacyRsa -> {
-                val tls = syncTlsProvider.clientTls(hostName)
+                val tls = syncTlsProvider.clientTls(device)
                     ?: return Outcome.Error("host not paired: $hostName", TransferFailure.GeneralTransferFailure)
                 val peerHybridKey = network.downloadFile("hybridPublicKey", hostName, port, tls = tls)
                     ?: return Outcome.Error("public key is null", TransferFailure.PublicKeyFetchFailure)
@@ -188,7 +226,7 @@ class ArtifactSyncClient(
                         "local ML-DSA signing key unavailable",
                         TransferFailure.GeneralTransferFailure,
                     )
-                val tls = syncTlsProvider.clientTls(hostName)
+                val tls = syncTlsProvider.clientTls(device)
                     ?: return Outcome.Error("host not paired: $hostName", TransferFailure.GeneralTransferFailure)
 
                 network.uploadFile(
@@ -215,19 +253,30 @@ class ArtifactSyncClient(
             // the same claim as "nobody answered" - retrying that blind could re-drive a push into a
             // peer that is mid-processing the last one. Revisit with evidence, not by guessing.
             is ConnectException, is SocketTimeoutException, is NoRouteToHostException ->
-                Outcome.Error("peer unreachable: ${it.message}", TransferFailure.PeerUnreachable(hostName))
+                Outcome.Error("peer unreachable: ${it.message}", TransferFailure.PeerUnreachable(device.lastHost))
             else ->
                 Outcome.Error("${artifact.pushFailurePrefix}: ${it.message}", TransferFailure.GeneralTransferFailure)
         }
     }
 
+    /** Pull from a **typed** address. Mirrors [push]'s host overload — resolve, then delegate. */
     suspend fun pull(
         artifact: SyncArtifact,
         hostName: String,
         port: Int,
-    ): Outcome<ByteArray> = runCatching {
+    ): Outcome<ByteArray> {
         val device = syncTlsProvider.deviceForHost(hostName)
-            ?: return Outcome.Error("host not paired: $hostName", TransferFailure.GeneralTransferFailure)
+            ?: return Outcome.Error(unresolvedHostMessage(hostName), TransferFailure.GeneralTransferFailure)
+        return pull(artifact, device, port)
+    }
+
+    /** Pull from [device], the record the user chose. See [push]'s device overload. */
+    suspend fun pull(
+        artifact: SyncArtifact,
+        device: TrustedDevice,
+        port: Int,
+    ): Outcome<ByteArray> = runCatching {
+        val hostName = device.lastHost
         when (device.pairingSecurity) {
             PairingSecurity.AwaitingConfirmation -> Outcome.Error(
                 StoredPeerKeys.reverificationRefusal(device.name),
@@ -235,7 +284,7 @@ class ArtifactSyncClient(
             )
 
             PairingSecurity.LegacyRsa -> {
-                val tls = syncTlsProvider.clientTls(hostName)
+                val tls = syncTlsProvider.clientTls(device)
                     ?: return Outcome.Error("host not paired: $hostName", TransferFailure.GeneralTransferFailure)
                 val keyPair = hybridKeyManager.getKeyPair()
                     ?: return Outcome.Error("no hybrid key", TransferFailure.GeneralTransferFailure)
@@ -260,7 +309,7 @@ class ArtifactSyncClient(
                         "no stored ML-DSA key for '${device.name}'",
                         TransferFailure.GeneralTransferFailure,
                     )
-                val tls = syncTlsProvider.clientTls(hostName)
+                val tls = syncTlsProvider.clientTls(device)
                     ?: return Outcome.Error("host not paired: $hostName", TransferFailure.GeneralTransferFailure)
                 val keyPair = hybridKeyManager.getKeyPair()
                     ?: return Outcome.Error("no hybrid key", TransferFailure.GeneralTransferFailure)
@@ -280,7 +329,7 @@ class ArtifactSyncClient(
             // now feeds runSyncSession's pull-retry loop: a PeerUnreachable here is what makes a
             // retried pull retry, and anything else here is what keeps a retried pull terminal.
             is ConnectException, is SocketTimeoutException, is NoRouteToHostException ->
-                Outcome.Error("peer unreachable: ${it.message}", TransferFailure.PeerUnreachable(hostName))
+                Outcome.Error("peer unreachable: ${it.message}", TransferFailure.PeerUnreachable(device.lastHost))
             else ->
                 Outcome.Error("${artifact.pullFailurePrefix}: ${it.message}", TransferFailure.GeneralTransferFailure)
         }

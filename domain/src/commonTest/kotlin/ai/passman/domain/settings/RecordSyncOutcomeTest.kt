@@ -1,8 +1,5 @@
 package ai.passman.domain.settings
 
-import ai.passman.domain.connectivity.PairingOwner
-import ai.passman.domain.connectivity.model.TrustedDevice
-import ai.passman.domain.connectivity.repository.TrustedDevicesRepository
 import ai.passman.domain.settings.model.SyncLogEntry
 import ai.passman.domain.settings.repository.SyncLogRepository
 import kotlin.test.Test
@@ -11,14 +8,17 @@ import kotlin.test.assertFailsWith
 import kotlin.time.Clock
 import kotlin.time.Instant
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.test.runTest
 
 /**
- * [RecordSyncOutcome] is the one seam every sync wrapper calls through, so its two jobs — resolve
- * a device name from a host, and never let a storage failure escape into the sync flow — are
- * pinned here once rather than three times inside `SyncOutcomeRecordingTest`.
+ * [RecordSyncOutcome] is the one seam every sync wrapper calls through, so its jobs — write the row
+ * it was handed, and never let a storage failure escape into the sync flow — are pinned here once
+ * rather than three times inside `SyncOutcomeRecordingTest`.
+ *
+ * The device name is now *given* rather than resolved from the host. It used to be looked up with
+ * `TrustedDevicesRepository.getByHost`, a first match over an address two pairings can share, so a
+ * row could name a device the user never synced with; the session already holds the record it was
+ * started with and passes its name straight through.
  */
 class RecordSyncOutcomeTest {
 
@@ -27,13 +27,17 @@ class RecordSyncOutcomeTest {
     }
 
     @Test
-    fun `a paired host resolves its device name onto the recorded entry`() = runTest {
+    fun `the given device name is written onto the recorded entry verbatim`() = runTest {
         val log = RecordOutcomeTestSyncLog()
-        val trustedDevices = RecordOutcomeTestTrustedDevices(TrustedDevice(name = "laptop", fingerprint = "fp", lastHost = HOST))
-        val recordSyncOutcome = RecordSyncOutcome(log, trustedDevices, fixedClock)
+        val recordSyncOutcome = RecordSyncOutcome(log, fixedClock)
 
         recordSyncOutcome(
-            RecordSyncOutcome.Params(artifact = "passwords", host = HOST, outcome = SyncLogEntry.OUTCOME_SUCCESS),
+            RecordSyncOutcome.Params(
+                artifact = "passwords",
+                host = HOST,
+                deviceName = "laptop",
+                outcome = SyncLogEntry.OUTCOME_SUCCESS,
+            ),
         )
 
         assertEquals(
@@ -50,24 +54,47 @@ class RecordSyncOutcomeTest {
         )
     }
 
-    /** Obligation 3. */
+    /**
+     * Two pairings sharing one address is exactly the case the old by-host resolution got wrong: it
+     * answered with whichever record came first, so a row could name the device the user did *not*
+     * sync with. Nothing here resolves anything any more — whichever of the two the session was
+     * given is the name that lands — and this pins that there is no lookup left to go wrong.
+     */
     @Test
-    fun `an unknown host records an empty device name and still appends`() = runTest {
+    fun `a host shared by two pairings still records the device the session names`() = runTest {
         val log = RecordOutcomeTestSyncLog()
-        val trustedDevices = RecordOutcomeTestTrustedDevices(device = null)
-        val recordSyncOutcome = RecordSyncOutcome(log, trustedDevices, fixedClock)
+        val recordSyncOutcome = RecordSyncOutcome(log, fixedClock)
+
+        recordSyncOutcome(
+            RecordSyncOutcome.Params(
+                artifact = "passwords",
+                host = HOST,
+                deviceName = "laptop-re-paired",
+                outcome = SyncLogEntry.OUTCOME_SUCCESS,
+            ),
+        )
+
+        assertEquals("laptop-re-paired", log.appended.single().deviceName)
+    }
+
+    /** Obligation 3: a caller with no device to name still gets its row; [HOST] carries it. */
+    @Test
+    fun `an empty device name records an empty name and still appends`() = runTest {
+        val log = RecordOutcomeTestSyncLog()
+        val recordSyncOutcome = RecordSyncOutcome(log, fixedClock)
 
         recordSyncOutcome(
             RecordSyncOutcome.Params(
                 artifact = "pgp-keys",
                 host = HOST,
+                deviceName = "",
                 outcome = SyncLogEntry.OUTCOME_FAILED,
                 detail = "Could not reach $HOST. The peer's IP may have changed.",
             ),
         )
 
         val entry = log.appended.single()
-        assertEquals("", entry.deviceName, "an unpaired/removed host must not fail the recording")
+        assertEquals("", entry.deviceName, "a nameless caller must not fail the recording")
         assertEquals("Could not reach $HOST. The peer's IP may have changed.", entry.detail)
     }
 
@@ -75,12 +102,16 @@ class RecordSyncOutcomeTest {
     @Test
     fun `a repository failure is logged and swallowed, never thrown`() = runTest {
         val log = RecordOutcomeTestSyncLog(throwOnAppend = IllegalStateException("disk full"))
-        val trustedDevices = RecordOutcomeTestTrustedDevices(device = null)
-        val recordSyncOutcome = RecordSyncOutcome(log, trustedDevices, fixedClock)
+        val recordSyncOutcome = RecordSyncOutcome(log, fixedClock)
 
         // No assertFailsWith here on purpose: the point under test is that nothing escapes.
         recordSyncOutcome(
-            RecordSyncOutcome.Params(artifact = "keystore", host = HOST, outcome = SyncLogEntry.OUTCOME_SUCCESS),
+            RecordSyncOutcome.Params(
+                artifact = "keystore",
+                host = HOST,
+                deviceName = "laptop",
+                outcome = SyncLogEntry.OUTCOME_SUCCESS,
+            ),
         )
     }
 
@@ -92,28 +123,18 @@ class RecordSyncOutcomeTest {
     @Test
     fun `cancellation is rethrown rather than swallowed`() = runTest {
         val log = RecordOutcomeTestSyncLog(throwOnAppend = CancellationException("cancelled"))
-        val trustedDevices = RecordOutcomeTestTrustedDevices(device = null)
-        val recordSyncOutcome = RecordSyncOutcome(log, trustedDevices, fixedClock)
+        val recordSyncOutcome = RecordSyncOutcome(log, fixedClock)
 
         assertFailsWith<CancellationException> {
             recordSyncOutcome(
-                RecordSyncOutcome.Params(artifact = "keystore", host = HOST, outcome = SyncLogEntry.OUTCOME_SUCCESS),
+                RecordSyncOutcome.Params(
+                    artifact = "keystore",
+                    host = HOST,
+                    deviceName = "laptop",
+                    outcome = SyncLogEntry.OUTCOME_SUCCESS,
+                ),
             )
         }
-    }
-
-    /** A lookup failure is exactly as harmless to the sync as an append failure. */
-    @Test
-    fun `a trusted-device lookup failure is also swallowed`() = runTest {
-        val log = RecordOutcomeTestSyncLog()
-        val trustedDevices = ThrowingTrustedDevices(IllegalStateException("store unreadable"))
-        val recordSyncOutcome = RecordSyncOutcome(log, trustedDevices, fixedClock)
-
-        recordSyncOutcome(
-            RecordSyncOutcome.Params(artifact = "passwords", host = HOST, outcome = SyncLogEntry.OUTCOME_SUCCESS),
-        )
-
-        assertEquals(emptyList(), log.appended, "a lookup that never completed must not append a half-built entry")
     }
 
     private companion object {
@@ -135,28 +156,4 @@ private class RecordOutcomeTestSyncLog(private val throwOnAppend: Throwable? = n
     override suspend fun clear() {
         appended.clear()
     }
-}
-
-private class RecordOutcomeTestTrustedDevices(private val device: TrustedDevice?) : TrustedDevicesRepository {
-    override fun observeAll(): Flow<List<TrustedDevice>> = emptyFlow()
-    override suspend fun getAll(): List<TrustedDevice> = listOfNotNull(device)
-    override suspend fun add(device: TrustedDevice, expectedOwner: PairingOwner) = true
-    override suspend fun remove(name: String) = Unit
-    override suspend fun getByHost(host: String): TrustedDevice? = device
-    override suspend fun updateLastSync(name: String, host: String, timestampMs: Long) = Unit
-    override suspend fun updateHost(name: String, host: String) = Unit
-    override suspend fun updateAllowedOps(name: String, allowedOps: Set<String>) = Unit
-    override suspend fun markSignedHybridPairingsForReverification() = Unit
-}
-
-private class ThrowingTrustedDevices(private val error: Throwable) : TrustedDevicesRepository {
-    override fun observeAll(): Flow<List<TrustedDevice>> = emptyFlow()
-    override suspend fun getAll(): List<TrustedDevice> = throw error
-    override suspend fun add(device: TrustedDevice, expectedOwner: PairingOwner) = true
-    override suspend fun remove(name: String) = Unit
-    override suspend fun getByHost(host: String): TrustedDevice? = throw error
-    override suspend fun updateLastSync(name: String, host: String, timestampMs: Long) = Unit
-    override suspend fun updateHost(name: String, host: String) = Unit
-    override suspend fun updateAllowedOps(name: String, allowedOps: Set<String>) = Unit
-    override suspend fun markSignedHybridPairingsForReverification() = Unit
 }

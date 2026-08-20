@@ -56,6 +56,16 @@ class SyncTlsProvider(
      * for an unknown or absent pin. This is how the receive side learns *which* authenticated device
      * sent a payload — the k2k handlers thread the pin through, and everything the signed-hybrid
      * policy decides is keyed on the device resolved here.
+     *
+     * KNOWN SEPARATE ISSUE, deliberately untouched: this is a first match keyed on *fingerprint*,
+     * and re-pairing one physical peer under a new name leaves two records sharing a fingerprint as
+     * well as a host. [authorize] below therefore decides an inbound operation against whichever of
+     * them happens to be first, so the two records' `allowedOps` and `pairingSecurity` are not
+     * interchangeable the way the identical pins make them look. The sender-side fix (threading the
+     * chosen [TrustedDevice] through the session) does not reach this receive-side path, which has
+     * no chooser and only ever sees a pin on the wire; resolving it needs its own decision about
+     * what an ambiguous pin should mean for authorization, so it is left as-is rather than
+     * half-changed here.
      */
     suspend fun deviceForPin(pin: String?): TrustedDevice? {
         if (pin == null) return null
@@ -64,7 +74,15 @@ class SyncTlsProvider(
         }
     }
 
-    /** The paired device record at [host], if any. Sender-side policy dispatches on this record. */
+    /**
+     * The paired device at a **typed** [host], or null when no pairing claims it or more than one
+     * does (see [ai.passman.domain.connectivity.repository.TrustedDevicesRepository.getByHost]).
+     *
+     * Only for the manual-address path, which has no chosen device to carry. A sync session already
+     * holds the record the user tapped and must hand it to [clientTls] directly — re-deriving it
+     * here would reintroduce exactly the mismatch between "the device the user chose" and "the
+     * device whose SPKI got pinned" that threading the record end to end removes.
+     */
     suspend fun deviceForHost(host: String): TrustedDevice? = trustedDevices.getByHost(host)
 
     /**
@@ -90,13 +108,16 @@ class SyncTlsProvider(
     }
 
     /**
-     * Client TLS for talking to [host]: presents this device's cert and pins the server to the
-     * stored fingerprint of the trusted device at [host]. Returns null when [host] isn't a paired
-     * device (unknown host — deny), the pairing awaits re-verification (its keys are not currently
-     * trustworthy in either direction), or the session keys aren't available.
+     * Client TLS for talking to [device]: presents this device's cert and pins the server to
+     * [device]'s stored fingerprint. Returns null when the pairing awaits re-verification (its keys
+     * are not currently trustworthy in either direction) or the session keys aren't available.
+     *
+     * Takes the record rather than an address on purpose. The pin is the whole point of this call,
+     * and resolving "which device is at this address" is a first-match lookup over a field two
+     * pairings can share — so a session could pin the SPKI of a pairing the user did not choose and
+     * fail the handshake with no way to tell why.
      */
-    suspend fun clientTls(host: String): K2kClientTls? {
-        val device = trustedDevices.getByHost(host) ?: return null
+    suspend fun clientTls(device: TrustedDevice): K2kClientTls? {
         val pairingMaySync = when (device.pairingSecurity) {
             PairingSecurity.LegacyRsa, PairingSecurity.SignedHybridRequired -> true
             PairingSecurity.AwaitingConfirmation -> false
@@ -110,6 +131,14 @@ class SyncTlsProvider(
             setOf(TlsIdentity.fingerprintToPin(device.fingerprint)),
         )
     }
+
+    /**
+     * Client TLS for a **typed** [host]. Resolves the address to the single pairing that claims it
+     * — refusing an ambiguous one — and then pins that record. Manual-address path only; a sync
+     * session calls the [TrustedDevice] overload above with the record the user chose.
+     */
+    suspend fun clientTls(host: String): K2kClientTls? =
+        deviceForHost(host)?.let { clientTls(it) }
 
     private companion object {
         // In-memory only; guards the throwaway session keystore, never persisted.

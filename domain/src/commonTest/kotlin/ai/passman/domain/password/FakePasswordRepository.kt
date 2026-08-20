@@ -1,6 +1,7 @@
 package ai.passman.domain.password
 
 import ai.passman.domain.base.model.Outcome
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.domain.password.model.PasswordEntry
 import ai.passman.domain.password.repository.PasswordRepository
 
@@ -12,8 +13,8 @@ class FakePasswordRepository(
     private val entries: () -> List<PasswordEntry> = { unsupported("getPasswordEntries") },
     private val add: suspend (AddPassword.EntryData) -> Boolean = { unsupported("addPasswordEntry") },
     private val list: suspend () -> Outcome<List<PasswordEntry>> = { Outcome.Success(entries()) },
-    private val push: suspend (String) -> Outcome<Unit> = { unsupported("pushPasswordDatabase") },
-    private val pull: suspend (String) -> Outcome<Unit> = { unsupported("pullPasswordDatabase") },
+    private val push: suspend (TrustedDevice) -> Outcome<Unit> = { unsupported("pushPasswordDatabase") },
+    private val pull: suspend (TrustedDevice) -> Outcome<Unit> = { unsupported("pullPasswordDatabase") },
 ) : PasswordRepository {
 
     val added = mutableListOf<AddPassword.EntryData>()
@@ -33,8 +34,8 @@ class FakePasswordRepository(
         unsupported("deletePasswordEntries")
     override suspend fun transferPasswordDatabase(hostName: String): Outcome<Unit> =
         unsupported("transferPasswordDatabase")
-    override suspend fun pushPasswordDatabase(hostName: String): Outcome<Unit> = push(hostName)
-    override suspend fun pullPasswordDatabase(hostName: String): Outcome<Unit> = pull(hostName)
+    override suspend fun pushPasswordDatabase(device: TrustedDevice): Outcome<Unit> = push(device)
+    override suspend fun pullPasswordDatabase(device: TrustedDevice): Outcome<Unit> = pull(device)
 
     companion object {
         private fun unsupported(name: String): Nothing =

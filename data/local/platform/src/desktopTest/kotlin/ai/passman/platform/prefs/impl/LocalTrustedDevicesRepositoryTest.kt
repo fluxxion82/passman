@@ -119,6 +119,70 @@ class LocalTrustedDevicesRepositoryTest {
     }
 
     /**
+     * An address is not an identity, and this store never promised it was: [TrustedDevice] has no
+     * id, `add` dedupes on [TrustedDevice.name] alone, and re-pairing the same physical peer under
+     * a new name therefore leaves two rows holding the same `lastHost` *and* the same fingerprint.
+     *
+     * `getByHost` used to answer such a host with `firstOrNull`, so callers that re-derived a device
+     * from an address — the last-sync stamp, the mTLS SPKI pin, the sync log's device name — could
+     * act on a pairing the user never chose. Those callers now carry the chosen record instead, and
+     * what is left of this method resolves a *typed* address, where a coin-flip between two
+     * indistinguishable pairings is worse than an honest "that address names no single device": the
+     * wrong pin fails the handshake for reasons the user cannot see.
+     */
+    @Test
+    fun `a host claimed by two pairings resolves to neither, while one claimant still resolves`() = runBlocking {
+        val factory = NamedStores()
+        val preferences = SwitchableUser("ster")
+        val devices = repository(factory, preferences)
+
+        devices.add(laptop, PairingOwner.current(preferences))
+        assertEquals(laptop, devices.getByHost(laptop.lastHost), "a single claimant still resolves")
+
+        // The same peer, re-paired under a different name: same host, same fingerprint, second row.
+        val rePairedLaptop = laptop.copy(name = "laptop-re-paired")
+        devices.add(rePairedLaptop, PairingOwner.current(preferences))
+        assertEquals(
+            listOf(laptop, rePairedLaptop),
+            devices.getAll(),
+            "precondition: nothing stops two pairings from claiming one address",
+        )
+
+        assertNull(
+            devices.getByHost(laptop.lastHost),
+            "an address two pairings claim identifies neither of them; answering with the first is a " +
+                "coin-flip the caller cannot see",
+        )
+        assertNull(devices.getByHost(phone.lastHost), "an address nobody claims still resolves to nothing")
+    }
+
+    /**
+     * The other route to the same collision, and the reason it cannot be prevented at write time
+     * without changing what `updateHost` means: repointing a device that moved on the LAN takes a
+     * name and an address and checks nothing about who else is already there.
+     */
+    @Test
+    fun `updateHost can move one pairing onto another's address, and the lookup then refuses`() = runBlocking {
+        val factory = NamedStores()
+        val preferences = SwitchableUser("ster")
+        val devices = repository(factory, preferences)
+
+        devices.add(laptop, PairingOwner.current(preferences))
+        devices.add(phone, PairingOwner.current(preferences))
+        assertEquals(phone, devices.getByHost(phone.lastHost))
+
+        devices.updateHost(laptop.name, phone.lastHost)
+
+        assertEquals(
+            listOf(laptop.copy(lastHost = phone.lastHost), phone),
+            devices.getAll(),
+            "updateHost repoints by name and does not refuse an occupied address",
+        )
+        assertNull(devices.getByHost(phone.lastHost), "the shared address now identifies neither pairing")
+        assertNull(devices.getByHost(laptop.lastHost), "and the address it moved off identifies nothing at all")
+    }
+
+    /**
      * The logout this mirrors is the production one, not a tidier one: `LogoutUser` announces
      * `LoginChanged(Anonymous)` and clears the session, and `LocalUserPreferences.clear()` only
      * drops the session id — `USER_NAME` stays behind so the login screen can prefill it. So

@@ -1,6 +1,7 @@
 package ai.passman.platform.transfer
 
 import ai.passman.domain.base.model.Outcome
+import ai.passman.domain.connectivity.model.TrustedDevice
 
 /**
  * PGP-bundle push/pull under the same per-device policy as `JvmPasswordTransferService`, shared with
@@ -13,12 +14,12 @@ class JvmPgpTransferService(
     override suspend fun transferPgpBundle(
         decryptedBundleBytes: ByteArray,
         fileName: String,
-        hostName: String,
+        device: TrustedDevice,
         port: Int,
-    ): Outcome<Unit> = client.push(SyncArtifact.PgpKeys, decryptedBundleBytes, fileName, hostName, port)
+    ): Outcome<Unit> = client.push(SyncArtifact.PgpKeys, decryptedBundleBytes, fileName, device, port)
 
     override suspend fun pullPgpBundle(
-        hostName: String,
+        device: TrustedDevice,
         port: Int,
-    ): Outcome<ByteArray> = client.pull(SyncArtifact.PgpKeys, hostName, port)
+    ): Outcome<ByteArray> = client.pull(SyncArtifact.PgpKeys, device, port)
 }

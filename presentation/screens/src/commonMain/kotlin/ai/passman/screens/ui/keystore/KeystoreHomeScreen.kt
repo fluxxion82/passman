@@ -14,6 +14,7 @@ import ai.passman.screens.ui.sync.SyncSessionSnackbarEffect
 import ai.passman.viewmodel.keystore.KeystoreHomeViewModel
 import ai.passman.viewmodel.sync.SyncTargetPickerState
 import ai.passman.viewmodel.sync.lastSyncedLabel
+import ai.passman.viewmodel.sync.rememberNowMs
 import ai.passman.viewvo.navigation.Back
 import ai.passman.viewvo.navigation.KeystoreDetails as KeystoreDetailsEvent
 import androidx.compose.foundation.layout.Column
@@ -23,7 +24,6 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavController
-import kotlin.time.Clock
 import kotlinx.coroutines.flow.receiveAsFlow
 
 @Composable
@@ -113,17 +113,23 @@ fun KeystoreHomeScreen(
             },
             onDismiss = presenter.syncTargetPicker::dismiss,
         )
-        is SyncTargetPickerState.Choosing -> SyncTargetDialog(
-            targets = picker.targets,
-            lastSyncedLabel = { lastSyncedLabel(it.lastSyncedAt, Clock.System.now().toEpochMilliseconds()) },
-            onSync = presenter::onSyncTargetChosen,
-            onEditHost = presenter::onSyncTargetHostEdited,
-            onManageDevices = {
-                presenter.syncTargetPicker.dismiss()
-                navController.navigate(TrustedDevicesRoute)
-            },
-            onDismiss = presenter.syncTargetPicker::dismiss,
-        )
+        is SyncTargetPickerState.Choosing -> {
+            // Hoisted out of the label lambda: a clock read inside the composable body is sampled
+            // once per composition, so "Just now" would still say "Just now" on a chooser the user
+            // left open for an hour. rememberNowMs re-publishes it while the dialog is up.
+            val nowMs = rememberNowMs()
+            SyncTargetDialog(
+                targets = picker.targets,
+                lastSyncedLabel = { lastSyncedLabel(it.lastSyncedAt, nowMs) },
+                onSync = presenter::onSyncTargetChosen,
+                onEditHost = presenter::onSyncTargetHostEdited,
+                onManageDevices = {
+                    presenter.syncTargetPicker.dismiss()
+                    navController.navigate(TrustedDevicesRoute)
+                },
+                onDismiss = presenter.syncTargetPicker::dismiss,
+            )
+        }
     }
 
     if (showDeleteConfirm) {

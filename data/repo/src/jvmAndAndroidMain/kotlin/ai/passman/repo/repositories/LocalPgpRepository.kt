@@ -4,6 +4,7 @@ import ai.passman.cache.di.passmanSessionScope
 import ai.passman.crypto.Crypto
 import ai.passman.crypto.CryptoKey
 import ai.passman.crypto.io.DurableFiles
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.keys.model.DSA
 import ai.passman.keys.model.EDDSA
 import ai.passman.keys.model.ELGAMAL
@@ -866,7 +867,7 @@ internal class LocalPgpRepository(
         )
     }
 
-    override suspend fun transferPgpKeys(hostName: String): Outcome<Unit> = withContext(coroutinesContextFacade.io) {
+    override suspend fun transferPgpKeys(device: TrustedDevice): Outcome<Unit> = withContext(coroutinesContextFacade.io) {
         runCatching {
             val user = userPreferences.getUser() as AppUser.LoggedIn
             val keysDir = File("$pgpDir${user.userName}")
@@ -875,17 +876,17 @@ internal class LocalPgpRepository(
             }
             val bundleBytes = DirectoryBundler.bundle(keysDir)
             val fileName = "${user.userName.hashCode()}_pgp"
-            pgpTransferService.transferPgpBundle(bundleBytes, fileName, hostName)
+            pgpTransferService.transferPgpBundle(bundleBytes, fileName, device)
         }.getOrElse {
             KLogger.e(it) { "failed to transfer pgp keys" }
             Outcome.Error("failed to transfer pgp keys: ${it.message}", TransferFailure.GeneralTransferFailure)
         }
     }
 
-    override suspend fun pushPgpKeys(hostName: String): Outcome<Unit> = transferPgpKeys(hostName)
+    override suspend fun pushPgpKeys(device: TrustedDevice): Outcome<Unit> = transferPgpKeys(device)
 
-    override suspend fun pullPgpKeys(hostName: String): Outcome<Unit> = withContext(coroutinesContextFacade.io) {
-        when (val pullOutcome = pgpTransferService.pullPgpBundle(hostName = hostName)) {
+    override suspend fun pullPgpKeys(device: TrustedDevice): Outcome<Unit> = withContext(coroutinesContextFacade.io) {
+        when (val pullOutcome = pgpTransferService.pullPgpBundle(device = device)) {
             is Outcome.Error -> pullOutcome
             is Outcome.Success -> {
                 // The transfer service already decrypted the (post-quantum) response.

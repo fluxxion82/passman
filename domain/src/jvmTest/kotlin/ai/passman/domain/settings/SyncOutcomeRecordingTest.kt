@@ -71,10 +71,10 @@ class SyncOutcomeRecordingTest {
                 trustedDevices = trusted,
                 fingerprintService = UnusedFingerprintService,
                 passwordEventPersistence = passwordEvents,
-                recordSyncOutcome = RecordSyncOutcome(log, trusted),
+                recordSyncOutcome = RecordSyncOutcome(log),
             )
 
-            val states = sync(HOST).toList()
+            val states = sync(PAIRED_DEVICE).toList()
 
             assertIs<SyncSessionState.Success>(states.last())
             val entry = log.appended.single()
@@ -98,10 +98,10 @@ class SyncOutcomeRecordingTest {
             trustedDevices = trusted,
             fingerprintService = UnusedFingerprintService,
             pgpEventPersistence = InMemoryPgpEventPersistence(UnconfinedFacade),
-            recordSyncOutcome = RecordSyncOutcome(log, trusted),
+            recordSyncOutcome = RecordSyncOutcome(log),
         )
 
-        sync(HOST).toList()
+        sync(PAIRED_DEVICE).toList()
 
         val entry = log.appended.single()
         assertEquals(SyncOps.PGP, entry.artifact)
@@ -123,10 +123,10 @@ class SyncOutcomeRecordingTest {
             trustedDevices = trusted,
             fingerprintService = UnusedFingerprintService,
             keystoreEventPersistence = InMemoryKeystoreEventPersistence(UnconfinedFacade),
-            recordSyncOutcome = RecordSyncOutcome(log, trusted),
+            recordSyncOutcome = RecordSyncOutcome(log),
         )
 
-        sync(HOST).toList()
+        sync(PAIRED_DEVICE).toList()
 
         val entry = log.appended.single()
         assertEquals(SyncOps.KEYSTORE, entry.artifact)
@@ -150,10 +150,10 @@ class SyncOutcomeRecordingTest {
             trustedDevices = trusted,
             fingerprintService = UnusedFingerprintService,
             passwordEventPersistence = InMemoryPasswordEventPersistence(UnconfinedFacade),
-            recordSyncOutcome = RecordSyncOutcome(log, trusted),
+            recordSyncOutcome = RecordSyncOutcome(log),
         )
 
-        val states = sync(HOST).toList()
+        val states = sync(PAIRED_DEVICE).toList()
 
         assertIs<SyncSessionState.Error>(states.last())
         val entry = log.appended.single()
@@ -178,10 +178,10 @@ class SyncOutcomeRecordingTest {
             trustedDevices = trusted,
             fingerprintService = UnusedFingerprintService,
             passwordEventPersistence = InMemoryPasswordEventPersistence(UnconfinedFacade),
-            recordSyncOutcome = RecordSyncOutcome(log, trusted),
+            recordSyncOutcome = RecordSyncOutcome(log),
         )
 
-        sync(HOST).toList()
+        sync(PAIRED_DEVICE).toList()
 
         val entry = log.appended.single()
         assertEquals(
@@ -210,11 +210,11 @@ class SyncOutcomeRecordingTest {
             trustedDevices = trusted,
             fingerprintService = UnusedFingerprintService,
             passwordEventPersistence = passwordEvents,
-            recordSyncOutcome = RecordSyncOutcome(log, trusted),
+            recordSyncOutcome = RecordSyncOutcome(log),
         )
 
         // Must not throw: a broken log store must not surface as a broken sync.
-        val states = sync(HOST).toList()
+        val states = sync(PAIRED_DEVICE).toList()
 
         assertIs<SyncSessionState.Success>(states.last(), "the user's own sync outcome must be untouched")
     }
@@ -232,10 +232,10 @@ class SyncOutcomeRecordingTest {
             trustedDevices = trusted,
             fingerprintService = UnusedFingerprintService,
             passwordEventPersistence = InMemoryPasswordEventPersistence(UnconfinedFacade),
-            recordSyncOutcome = RecordSyncOutcome(log, trusted),
+            recordSyncOutcome = RecordSyncOutcome(log),
         )
 
-        val states = sync(HOST).toList()
+        val states = sync(PAIRED_DEVICE).toList()
 
         val terminal = assertIs<SyncSessionState.Error>(states.last())
         assertIs<TransferFailure.PublicKeyFetchFailure>(terminal.failure)
@@ -273,10 +273,10 @@ class SyncOutcomeRecordingTest {
             trustedDevices = trusted,
             fingerprintService = UnusedFingerprintService,
             passwordEventPersistence = InMemoryPasswordEventPersistence(UnconfinedFacade),
-            recordSyncOutcome = RecordSyncOutcome(log, trusted),
+            recordSyncOutcome = RecordSyncOutcome(log),
         )
 
-        val collector = launch { sync(HOST).toList() }
+        val collector = launch { sync(PAIRED_DEVICE).toList() }
         pullStarted.await()
         collector.cancel()
         collector.join()
@@ -314,10 +314,10 @@ class SyncOutcomeRecordingTest {
             trustedDevices = trusted,
             fingerprintService = UnusedFingerprintService,
             passwordEventPersistence = InMemoryPasswordEventPersistence(UnconfinedFacade),
-            recordSyncOutcome = RecordSyncOutcome(log, trusted),
+            recordSyncOutcome = RecordSyncOutcome(log),
         )
 
-        val states = sync(HOST).toList()
+        val states = sync(PAIRED_DEVICE).toList()
 
         assertIs<SyncSessionState.Error>(states.last())
         val entry = log.appended.single()
@@ -350,14 +350,14 @@ class SyncOutcomeRecordingTest {
             trustedDevices = trusted,
             fingerprintService = UnusedFingerprintService,
             passwordEventPersistence = InMemoryPasswordEventPersistence(UnconfinedFacade),
-            recordSyncOutcome = RecordSyncOutcome(log, trusted),
+            recordSyncOutcome = RecordSyncOutcome(log),
             // The session's retry delays are virtual under runTest, so its deadline has to be read
             // from the same virtual clock. On the system clock the loop spins in real time until
             // the harness kills the test a minute later.
             clock = SchedulerClock(testScheduler),
         )
 
-        val states = sync(HOST).toList()
+        val states = sync(PAIRED_DEVICE).toList()
 
         val terminal = assertIs<SyncSessionState.Error>(states.last())
         val failure = assertIs<TransferFailure.PeerSyncTimeout>(terminal.failure)
@@ -378,11 +378,59 @@ class SyncOutcomeRecordingTest {
 
     // endregion
 
+    // region: the log row must name the device the session was given
+
+    /**
+     * The device name on a log row used to be resolved from the row's host, with
+     * `TrustedDevicesRepository.getByHost` - a first match over an address two pairings can share.
+     * Re-pairing the same physical peer under a new name is enough to produce that pair (same host,
+     * same fingerprint, two rows), and the log would then attribute the sync to whichever of them
+     * came first in the store rather than to the one the user tapped.
+     *
+     * The decoy is deliberately first here, so a resolution that still went through the host would
+     * name it. Nothing in [RecordSyncOutcome] resolves anything any more, and this is what holds
+     * that: the name written is the name the session carried in.
+     */
+    @Test
+    fun `the log names the device the session was given, not another pairing at the same address`() = runTest {
+        val log = RecordingTestSyncLog()
+        val transfer = RecordingTestTransferRepository()
+        val trusted = RecordingTestTrustedDevices(SAME_HOST_DECOY, PAIRED_DEVICE)
+        val sync = SyncPasswords(
+            passwordRepository = FakePasswordRepository(
+                push = { transfer.handshake.value = true; Outcome.Success(Unit) },
+                pull = { Outcome.Success(Unit) },
+            ),
+            transferRepository = transfer,
+            trustedDevices = trusted,
+            fingerprintService = UnusedFingerprintService,
+            passwordEventPersistence = InMemoryPasswordEventPersistence(UnconfinedFacade),
+            recordSyncOutcome = RecordSyncOutcome(log),
+        )
+
+        val states = sync(PAIRED_DEVICE).toList()
+
+        assertIs<SyncSessionState.Success>(states.last())
+        val entry = log.appended.single()
+        assertEquals(
+            PAIRED_DEVICE.name,
+            entry.deviceName,
+            "the row must name the tapped device, not '${SAME_HOST_DECOY.name}' - the record a " +
+                "by-host resolution would have found first",
+        )
+        assertEquals(HOST, entry.host)
+    }
+
+    // endregion
+
     // region: harness
 
     private companion object {
         const val HOST = "192.0.2.42"
         val PAIRED_DEVICE = TrustedDevice(name = "laptop", fingerprint = "AA:BB:CC", lastHost = HOST)
+
+        /** The same physical peer re-paired under a new name: same host, same fingerprint, new row. */
+        val SAME_HOST_DECOY = TrustedDevice(name = "laptop-re-paired", fingerprint = "AA:BB:CC", lastHost = HOST)
     }
 
     // endregion
@@ -402,12 +450,17 @@ private class RecordingTestSyncLog(private val throwOnAppend: Throwable? = null)
     }
 }
 
-private class RecordingTestTrustedDevices(private val device: TrustedDevice?) : TrustedDevicesRepository {
+private class RecordingTestTrustedDevices(private val devices: List<TrustedDevice>) : TrustedDevicesRepository {
+    constructor(device: TrustedDevice?) : this(listOfNotNull(device))
+    constructor(vararg devices: TrustedDevice) : this(devices.toList())
+
     override fun observeAll(): Flow<List<TrustedDevice>> = emptyFlow()
-    override suspend fun getAll(): List<TrustedDevice> = listOfNotNull(device)
+    override suspend fun getAll(): List<TrustedDevice> = devices
     override suspend fun add(device: TrustedDevice, expectedOwner: PairingOwner) = true
     override suspend fun remove(name: String) = Unit
-    override suspend fun getByHost(host: String): TrustedDevice? = device
+    /** Mirrors production: one match or nothing, never a first match. */
+    override suspend fun getByHost(host: String): TrustedDevice? =
+        devices.filter { it.lastHost == host }.singleOrNull()
     override suspend fun updateLastSync(name: String, host: String, timestampMs: Long) = Unit
     override suspend fun updateHost(name: String, host: String) = Unit
     override suspend fun updateAllowedOps(name: String, allowedOps: Set<String>) = Unit

@@ -1,6 +1,7 @@
 package ai.passman.domain.pgp.repository
 
 import ai.passman.domain.base.model.Outcome
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.domain.pgp.model.*
 
 interface PgpRepository {
@@ -102,7 +103,12 @@ interface PgpRepository {
      */
     suspend fun deleteDefaultKeyRings(): Outcome<Unit>
 
-    suspend fun transferPgpKeys(hostName: String): Outcome<Unit>
-    suspend fun pushPgpKeys(hostName: String): Outcome<Unit>
-    suspend fun pullPgpKeys(hostName: String): Outcome<Unit>
+    /**
+     * Bilateral Sync Mode push/pull, against the [TrustedDevice] record the user chose — see
+     * [ai.passman.domain.password.repository.PasswordRepository.pushPasswordDatabase] for why the
+     * record travels rather than its address.
+     */
+    suspend fun transferPgpKeys(device: TrustedDevice): Outcome<Unit>
+    suspend fun pushPgpKeys(device: TrustedDevice): Outcome<Unit>
+    suspend fun pullPgpKeys(device: TrustedDevice): Outcome<Unit>
 }

@@ -526,11 +526,12 @@ class SignedHybridSyncPolicyTest {
     @Test
     fun awaitingConfirmationPeer_isRefusedInBothDirections_beforeAnyNetworkIo() = runBlocking<Unit> {
         val net = startPeerServer(servedHybridKey = serializedHybrid(peerHybrid))
-        val devices = FakeTrustedDevices(peerServerDevice(PairingSecurity.AwaitingConfirmation))
+        val device = peerServerDevice(PairingSecurity.AwaitingConfirmation)
+        val devices = FakeTrustedDevices(device)
         val service = passwordTransferService(devices)
 
         val push = service.transferDatabaseBytes("refused".encodeToByteArray(), STAGED, HOST, net.port)
-        val pull = service.pullDatabase(HOST, net.port)
+        val pull = service.pullDatabase(device, net.port)
 
         assertTrue(assertIs<Outcome.Error>(push).message.contains("re-verification"))
         assertTrue(assertIs<Outcome.Error>(pull).message.contains("re-verification"))
@@ -547,9 +548,10 @@ class SignedHybridSyncPolicyTest {
                 EnvelopeCodec.encryptHybrid(payload, EnvelopeCodec.deserializePublicKey(wireKey), peerMlDsa)
             },
         )
-        val service = passwordTransferService(FakeTrustedDevices(peerServerDevice(PairingSecurity.SignedHybridRequired)))
+        val device = peerServerDevice(PairingSecurity.SignedHybridRequired)
+        val service = passwordTransferService(FakeTrustedDevices(device))
 
-        val outcome = service.pullDatabase(HOST, net.port)
+        val outcome = service.pullDatabase(device, net.port)
 
         assertContentEquals(payload, assertIs<Outcome.Success<ByteArray>>(outcome).value)
         assertTrue(
@@ -569,9 +571,10 @@ class SignedHybridSyncPolicyTest {
                 )
             },
         )
-        val service = passwordTransferService(FakeTrustedDevices(peerServerDevice(PairingSecurity.SignedHybridRequired)))
+        val device = peerServerDevice(PairingSecurity.SignedHybridRequired)
+        val service = passwordTransferService(FakeTrustedDevices(device))
 
-        assertIs<Outcome.Error>(service.pullDatabase(HOST, net.port))
+        assertIs<Outcome.Error>(service.pullDatabase(device, net.port))
     }
 
     @Test
@@ -581,24 +584,26 @@ class SignedHybridSyncPolicyTest {
                 EnvelopeCodec.encryptHybrid("unsigned".encodeToByteArray(), EnvelopeCodec.deserializePublicKey(wireKey))
             },
         )
-        val service = passwordTransferService(FakeTrustedDevices(peerServerDevice(PairingSecurity.SignedHybridRequired)))
+        val device = peerServerDevice(PairingSecurity.SignedHybridRequired)
+        val service = passwordTransferService(FakeTrustedDevices(device))
 
-        assertIs<Outcome.Error>(service.pullDatabase(HOST, net.port))
+        assertIs<Outcome.Error>(service.pullDatabase(device, net.port))
     }
 
     @Test
     fun signedHybridPgpAndKeystorePush_alsoUseStoredKeysOnly() = runBlocking<Unit> {
         val net = startPeerServer(servedHybridKey = serializedHybrid(HybridKem.generateKeyPair())) // decoy
-        val devices = FakeTrustedDevices(peerServerDevice(PairingSecurity.SignedHybridRequired))
+        val device = peerServerDevice(PairingSecurity.SignedHybridRequired)
+        val devices = FakeTrustedDevices(device)
         val syncTls = SyncTlsProvider(preferences, devices)
         val hybrid = hybridManager(devices)
         val mldsa = mlDsaManager(devices)
         val senderSignerKey = assertNotNull(mldsa.getPublicKeySerialized())
 
         val pgp = JvmPgpTransferService(syncClient(syncTls, hybrid, mldsa))
-            .transferPgpBundle("pgp bundle".encodeToByteArray(), "pgp", HOST, net.port)
+            .transferPgpBundle("pgp bundle".encodeToByteArray(), "pgp", device, net.port)
         val keystore = JvmKeystoreTransferService(syncClient(syncTls, hybrid, mldsa))
-            .transferKeystoreBundle("keystore bundle".encodeToByteArray(), "ks", HOST, net.port)
+            .transferKeystoreBundle("keystore bundle".encodeToByteArray(), "ks", device, net.port)
 
         assertIs<Outcome.Success<Unit>>(pgp)
         assertIs<Outcome.Success<Unit>>(keystore)

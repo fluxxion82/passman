@@ -232,7 +232,7 @@ val domainModule = module {
     single { GetIpAddress(transferRepository = get()) }
     single { ExecuteReconcileAction(transferRepository = get(), passwordEventPersistence = get()) }
     single { ShareFile(settingsService = get()) }
-    single { RecordSyncOutcome(syncLogRepository = get(), trustedDevices = get()) }
+    single { RecordSyncOutcome(syncLogRepository = get()) }
     single { GetSyncLog(repository = get()) }
     single { ClearSyncLog(repository = get()) }
     single {

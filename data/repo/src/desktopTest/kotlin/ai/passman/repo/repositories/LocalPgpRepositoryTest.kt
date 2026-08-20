@@ -1,5 +1,6 @@
 package ai.passman.repo.repositories
 
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.keys.model.EDDSA
 import ai.passman.pgp.bundled.BundledDeveloperKey
 import ai.passman.pgp.service.PgpClient
@@ -87,11 +88,11 @@ class LocalPgpRepositoryTest {
         override suspend fun transferPgpBundle(
             decryptedBundleBytes: ByteArray,
             fileName: String,
-            hostName: String,
+            device: TrustedDevice,
             port: Int,
         ): Outcome<Unit> = Outcome.Success(Unit)
 
-        override suspend fun pullPgpBundle(hostName: String, port: Int): Outcome<ByteArray> =
+        override suspend fun pullPgpBundle(device: TrustedDevice, port: Int): Outcome<ByteArray> =
             Outcome.Success(ByteArray(0))
     }
 

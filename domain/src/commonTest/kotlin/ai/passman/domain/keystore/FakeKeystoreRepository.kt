@@ -1,6 +1,7 @@
 package ai.passman.domain.keystore
 
 import ai.passman.domain.base.model.Outcome
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.domain.crypto.model.EncryptedData
 import ai.passman.domain.keystore.model.KeyStoreInfo
 import ai.passman.domain.keystore.model.KeystoreKey
@@ -17,8 +18,8 @@ class FakeKeystoreRepository(
         { unsupported("createKeyStore") },
     private val delete: (path: String, name: String, password: String) -> Boolean =
         { _, _, _ -> unsupported("deleteKeystore") },
-    private val push: suspend (String) -> Outcome<Unit> = { unsupported("pushKeystores") },
-    private val pull: suspend (String) -> Outcome<Unit> = { unsupported("pullKeystores") },
+    private val push: suspend (TrustedDevice) -> Outcome<Unit> = { unsupported("pushKeystores") },
+    private val pull: suspend (TrustedDevice) -> Outcome<Unit> = { unsupported("pullKeystores") },
 ) : KeystoreRepository {
 
     val createRequests = mutableListOf<CreateKeyStore.CreateRequest>()
@@ -113,9 +114,9 @@ class FakeKeystoreRepository(
         signature: String,
     ): Outcome<Boolean> = unsupported("verifySignatureFile")
     override suspend fun getPublicKeyBytes(): ByteArray = unsupported("getPublicKeyBytes")
-    override suspend fun transferKeystores(hostName: String): Outcome<Unit> = unsupported("transferKeystores")
-    override suspend fun pushKeystores(hostName: String): Outcome<Unit> = push(hostName)
-    override suspend fun pullKeystores(hostName: String): Outcome<Unit> = pull(hostName)
+    override suspend fun transferKeystores(device: TrustedDevice): Outcome<Unit> = unsupported("transferKeystores")
+    override suspend fun pushKeystores(device: TrustedDevice): Outcome<Unit> = push(device)
+    override suspend fun pullKeystores(device: TrustedDevice): Outcome<Unit> = pull(device)
     override fun clearKeyStore(): Unit = unsupported("clearKeyStore")
 
     companion object {

@@ -6,6 +6,7 @@ import ai.passman.crypto.vault.PasswordVaultCipher
 import ai.passman.crypto.vault.VaultCipher
 import ai.passman.crypto.vault.VaultSession
 import ai.passman.crypto.vault.VaultSessionKey
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.platform.crypto.JvmSha256Service
 import ai.passman.platform.storage.JvmPasswordDatabaseStorage
 import ai.passman.platform.storage.PasswordDatabaseStorage
@@ -322,7 +323,7 @@ class EntryIdentityTest {
         legacyVault(existing)
 
         val outcome = repository(transferService = FakeTransfer(Json.encodeToString(incoming).encodeToByteArray()))
-            .pullPasswordDatabase("peer-host")
+            .pullPasswordDatabase(peerDevice("peer-host"))
         assertIs<Outcome.Success<Unit>>(outcome)
 
         val merged = repository().getPasswordEntries()
@@ -355,7 +356,7 @@ class EntryIdentityTest {
 
         // The peer has not seen the rename and has not upgraded: its payload has no uuid at all.
         val outcome = repository(transferService = FakeTransfer(Json.encodeToString(original).encodeToByteArray()))
-            .pullPasswordDatabase("peer-host")
+            .pullPasswordDatabase(peerDevice("peer-host"))
         assertIs<Outcome.Success<Unit>>(outcome)
 
         assertEquals(
@@ -388,7 +389,7 @@ class EntryIdentityTest {
 
         val peer = listOf(alice.copy(password = "rotated", dateCreated = alice.dateCreated + 1))
         val outcome = repository(transferService = FakeTransfer(Json.encodeToString(peer).encodeToByteArray()))
-            .pullPasswordDatabase("peer-host")
+            .pullPasswordDatabase(peerDevice("peer-host"))
         assertIs<Outcome.Success<Unit>>(outcome)
 
         val after = repository.getPasswordEntries()
@@ -415,7 +416,7 @@ class EntryIdentityTest {
         legacyVault(duplicated)
 
         val outcome = repository(transferService = FakeTransfer("[]".encodeToByteArray()))
-            .pullPasswordDatabase("peer-host")
+            .pullPasswordDatabase(peerDevice("peer-host"))
         assertIs<Outcome.Success<Unit>>(outcome)
 
         assertEquals(
@@ -472,7 +473,7 @@ class EntryIdentityTest {
             activity = listOf(EntryActivity(50L, "peer-only"), EntryActivity(200L, EntryActivity.KIND_EDITED)),
         )
         val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
-            .pullPasswordDatabase("peer-host")
+            .pullPasswordDatabase(peerDevice("peer-host"))
         assertIs<Outcome.Success<Unit>>(outcome)
 
         val merged = repository().getPasswordEntries().single { it.entryName == "gmail" }
@@ -506,7 +507,7 @@ class EntryIdentityTest {
             activity = listOf(EntryActivity(50L, "peer-only")),
         )
         val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
-            .pullPasswordDatabase("peer-host")
+            .pullPasswordDatabase(peerDevice("peer-host"))
         assertIs<Outcome.Success<Unit>>(outcome)
 
         val merged = repository().getPasswordEntries().single { it.entryName == "gmail" }
@@ -534,7 +535,7 @@ class EntryIdentityTest {
             activity = listOf(shared, EntryActivity(200L, EntryActivity.KIND_EDITED)),
         )
         val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
-            .pullPasswordDatabase("peer-host")
+            .pullPasswordDatabase(peerDevice("peer-host"))
         assertIs<Outcome.Success<Unit>>(outcome)
 
         val merged = repository().getPasswordEntries().single { it.entryName == "gmail" }
@@ -553,7 +554,7 @@ class EntryIdentityTest {
 
         val incoming = entry("gmail", id = "1", dateCreated = 100L).copy(createdAt = 10L)
         val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
-            .pullPasswordDatabase("peer-host")
+            .pullPasswordDatabase(peerDevice("peer-host"))
         assertIs<Outcome.Success<Unit>>(outcome)
 
         val merged = repository().getPasswordEntries().single { it.entryName == "gmail" }
@@ -576,7 +577,7 @@ class EntryIdentityTest {
 
         val incoming = entry("gmail", id = "1", dateCreated = 200L, password = "rotated").copy(createdAt = 999L)
         val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
-            .pullPasswordDatabase("peer-host")
+            .pullPasswordDatabase(peerDevice("peer-host"))
         assertIs<Outcome.Success<Unit>>(outcome)
 
         val merged = repository().getPasswordEntries().single { it.entryName == "gmail" }
@@ -596,7 +597,7 @@ class EntryIdentityTest {
 
         val incoming = entry("gmail", id = "1", dateCreated = 200L).copy(createdAt = 100L, activity = listOf(exotic))
         val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
-            .pullPasswordDatabase("peer-host")
+            .pullPasswordDatabase(peerDevice("peer-host"))
         assertIs<Outcome.Success<Unit>>(outcome)
 
         val merged = repository().getPasswordEntries().single { it.entryName == "gmail" }
@@ -620,7 +621,7 @@ class EntryIdentityTest {
             activity = (15L..29L).map { EntryActivity(it, EntryActivity.KIND_EDITED) },
         )
         val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
-            .pullPasswordDatabase("peer-host")
+            .pullPasswordDatabase(peerDevice("peer-host"))
         assertIs<Outcome.Success<Unit>>(outcome)
 
         val merged = repository().getPasswordEntries().single { it.entryName == "gmail" }
@@ -692,7 +693,7 @@ class EntryIdentityTest {
         )
         val peerBytes = Json.encodeToString(listOf(peer)).encodeToByteArray()
 
-        val first = repository(transferService = FakeTransfer(peerBytes)).pullPasswordDatabase("peer-host")
+        val first = repository(transferService = FakeTransfer(peerBytes)).pullPasswordDatabase(peerDevice("peer-host"))
         assertIs<Outcome.Success<Unit>>(first)
         val afterFirst = repository().getPasswordEntries().single { it.entryName == "gmail" }
 
@@ -701,7 +702,7 @@ class EntryIdentityTest {
         assertTrue(afterFirst.activity.none { it.at == 1L && it.kind == "a" }, "the tied loser must be dropped")
         assertEquals(3L, afterFirst.createdAt, "the earlier createdAt wins even though its row also won dateCreated")
 
-        val second = repository(transferService = FakeTransfer(peerBytes)).pullPasswordDatabase("peer-host")
+        val second = repository(transferService = FakeTransfer(peerBytes)).pullPasswordDatabase(peerDevice("peer-host"))
         assertIs<Outcome.Success<Unit>>(second)
         val afterSecond = repository().getPasswordEntries().single { it.entryName == "gmail" }
 
@@ -730,7 +731,7 @@ class EntryIdentityTest {
         // Vault A (the class's shared storage/root): X is local, Y arrives as the peer.
         legacyVault(listOf(x))
         val outcomeA = repository(transferService = FakeTransfer(Json.encodeToString(listOf(y)).encodeToByteArray()))
-            .pullPasswordDatabase("peer-host")
+            .pullPasswordDatabase(peerDevice("peer-host"))
         assertIs<Outcome.Success<Unit>>(outcomeA)
         val afterA = repository().getPasswordEntries().single { it.entryName == "gmail" }
 
@@ -749,7 +750,7 @@ class EntryIdentityTest {
             val outcomeB = repository(
                 storage = otherStorage,
                 transferService = FakeTransfer(Json.encodeToString(listOf(x)).encodeToByteArray()),
-            ).pullPasswordDatabase("peer-host")
+            ).pullPasswordDatabase(peerDevice("peer-host"))
             assertIs<Outcome.Success<Unit>>(outcomeB)
             val afterB = repository(storage = otherStorage).getPasswordEntries().single { it.entryName == "gmail" }
 
@@ -1253,7 +1254,14 @@ class EntryIdentityTest {
             port: Int,
         ) = Outcome.Success(Unit)
 
-        override suspend fun pullDatabase(hostName: String, port: Int) = Outcome.Success(pullBytes)
+        override suspend fun transferDatabaseBytes(
+            decryptedDatabaseBytes: ByteArray,
+            fileName: String,
+            device: TrustedDevice,
+            port: Int,
+        ) = Outcome.Success(Unit)
+
+        override suspend fun pullDatabase(device: TrustedDevice, port: Int) = Outcome.Success(pullBytes)
     }
 
     private class FakePreferences : UserPreferences {

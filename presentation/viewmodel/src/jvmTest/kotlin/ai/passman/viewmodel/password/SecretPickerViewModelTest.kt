@@ -1,6 +1,7 @@
 package ai.passman.viewmodel.password
 
 import ai.passman.domain.base.model.Outcome
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.domain.password.AddPassword
 import ai.passman.domain.password.GetPasswordEntries
 import ai.passman.domain.password.model.PasswordEntry
@@ -399,8 +400,8 @@ private class FakePasswordRepository : PasswordRepository {
     override suspend fun deletePasswordEntry(passwordUuid: String): Boolean = unsupported()
     override suspend fun deletePasswordEntries(passwordUuids: Collection<String>): Int = unsupported()
     override suspend fun transferPasswordDatabase(hostName: String): Outcome<Unit> = unsupported()
-    override suspend fun pushPasswordDatabase(hostName: String): Outcome<Unit> = unsupported()
-    override suspend fun pullPasswordDatabase(hostName: String): Outcome<Unit> = unsupported()
+    override suspend fun pushPasswordDatabase(device: TrustedDevice): Outcome<Unit> = unsupported()
+    override suspend fun pullPasswordDatabase(device: TrustedDevice): Outcome<Unit> = unsupported()
 
     private fun unsupported(): Nothing =
         throw UnsupportedOperationException("the picker only reads the vault")

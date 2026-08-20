@@ -1,6 +1,7 @@
 package ai.passman.domain.password
 
 import ai.passman.domain.base.model.Outcome
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.domain.password.model.PasswordEntry
 import ai.passman.domain.password.model.PasswordEvent
 import ai.passman.domain.password.persistence.PasswordEventPersistence
@@ -137,7 +138,7 @@ class PasswordWriteEventsTest {
         override suspend fun deletePasswordEntries(passwordUuids: Collection<String>): Int = batchResult
         override suspend fun getPasswordEntries(): List<PasswordEntry> = error("not a read test")
         override suspend fun transferPasswordDatabase(hostName: String): Outcome<Unit> = error("not a transfer test")
-        override suspend fun pushPasswordDatabase(hostName: String): Outcome<Unit> = error("not a transfer test")
-        override suspend fun pullPasswordDatabase(hostName: String): Outcome<Unit> = error("not a transfer test")
+        override suspend fun pushPasswordDatabase(device: TrustedDevice): Outcome<Unit> = error("not a transfer test")
+        override suspend fun pullPasswordDatabase(device: TrustedDevice): Outcome<Unit> = error("not a transfer test")
     }
 }

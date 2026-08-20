@@ -36,6 +36,27 @@ interface TrustedDevicesRepository {
      */
     suspend fun add(device: TrustedDevice, expectedOwner: PairingOwner): Boolean
     suspend fun remove(name: String)
+
+    /**
+     * Resolves a **typed address** to the one pairing that claims it, or null when no pairing does
+     * — or when more than one does.
+     *
+     * This is not a device lookup, and it is deliberately no longer used as one. [TrustedDevice] has
+     * no id: [TrustedDevice.name] is its identity key, and nothing keeps two records from holding
+     * the same [TrustedDevice.lastHost] — [add] dedupes on name only, [updateHost] repoints on name
+     * only with no collision check, and re-pairing the same physical peer under a new name yields a
+     * second record with the same host *and* the same fingerprint. A caller that already holds the
+     * device the user chose must carry that record through rather than re-derive it from an address:
+     * every consumer that re-derived it (the last-sync stamp, the mTLS pin, the sync log) could
+     * silently land on the wrong record, which is the whole reason the sync path now threads
+     * [TrustedDevice] end to end.
+     *
+     * What is left is the case that genuinely has no device to carry: an address the user typed into
+     * Settings > Transfer's manual address box. There, refusing an ambiguous host is the only honest
+     * answer — picking a first match would pin one of two indistinguishable pairings' SPKI on a
+     * coin-flip, and the failure that follows would be unexplainable to the user. Null instead lets
+     * the caller say "that address does not identify one paired device".
+     */
     suspend fun getByHost(host: String): TrustedDevice?
     suspend fun updateLastSync(name: String, host: String, timestampMs: Long)
 

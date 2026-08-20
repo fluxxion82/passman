@@ -1,6 +1,7 @@
 package ai.passman.repo.repositories
 
 import ai.passman.cache.KeyCacheManager
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.keystore.JvmKeyStoreClient
 import ai.passman.platform.transfer.KeystoreTransferService
 import ai.passman.repo.Platform
@@ -57,11 +58,11 @@ class LocalKeystoreRepositoryTest {
         override suspend fun transferKeystoreBundle(
             decryptedBundleBytes: ByteArray,
             fileName: String,
-            hostName: String,
+            device: TrustedDevice,
             port: Int,
         ): Outcome<Unit> = Outcome.Success(Unit)
 
-        override suspend fun pullKeystoreBundle(hostName: String, port: Int): Outcome<ByteArray> =
+        override suspend fun pullKeystoreBundle(device: TrustedDevice, port: Int): Outcome<ByteArray> =
             Outcome.Success(ByteArray(0))
     }
 

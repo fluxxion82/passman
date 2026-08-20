@@ -5,6 +5,7 @@ import ai.passman.crypto.CryptoKey
 import ai.passman.crypto.vault.VaultCipher
 import ai.passman.crypto.vault.VaultSession
 import ai.passman.crypto.vault.VaultSessionKey
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.platform.storage.PasswordDatabaseStorage
 import ai.passman.platform.transfer.PasswordTransferService
 import ai.passman.platform.vault.PortableVaultFormat
@@ -364,14 +365,45 @@ class LocalPasswordRepository(
         }
     }
 
-    override suspend fun pushPasswordDatabase(hostName: String): Outcome<Unit> =
-        transferPasswordDatabase(hostName)
+    /**
+     * The sync-session push, against the record the chooser handed us rather than its address.
+     *
+     * Deliberately not routed through [transferPasswordDatabase]: that one exists for the address a
+     * user types into Settings > Transfer and has to resolve it to a pairing, which is a lookup over
+     * a field two pairings can share. A session already knows which device it is talking to, so it
+     * hands the record straight to the transport and the SPKI that gets pinned is always the one the
+     * user picked.
+     */
+    override suspend fun pushPasswordDatabase(device: TrustedDevice): Outcome<Unit> {
+        return try {
+            passmanSessionScope(userPreferences.getSessionId()) { scope ->
+                val user = userPreferences.getUser() as AppUser.LoggedIn
+                // A read, and only a read: a transfer is not the moment to rewrite the vault, and
+                // failing the transfer because a migration failed would be the wrong trade.
+                val vault = openVault(scope, user.userName, "pushPasswordDatabase")
+                    ?: return@passmanSessionScope Outcome.Error(
+                        "failed to read password database",
+                        TransferFailure.GeneralTransferFailure,
+                    )
 
-    override suspend fun pullPasswordDatabase(hostName: String): Outcome<Unit> {
+                transferService.transferDatabaseBytes(
+                    decryptedDatabaseBytes = vault.plaintext,
+                    fileName = "${user.userName.hashCode()}",
+                    device = device,
+                )
+            } ?: Outcome.Error("Failed to create scope", TransferFailure.GeneralTransferFailure)
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            KLogger.e(error) { "pushPasswordDatabase failed" }
+            Outcome.Error("failed to transfer password database", TransferFailure.GeneralTransferFailure)
+        }
+    }
+
+    override suspend fun pullPasswordDatabase(device: TrustedDevice): Outcome<Unit> {
         return passmanSessionScope(userPreferences.getSessionId()) { scope ->
             val user = userPreferences.getUser() as AppUser.LoggedIn
 
-            when (val pullOutcome = transferService.pullDatabase(hostName = hostName)) {
+            when (val pullOutcome = transferService.pullDatabase(device = device)) {
                 is Outcome.Error -> pullOutcome
                 is Outcome.Success -> {
                     // The transfer service already decrypted the (post-quantum) response. What lands

@@ -148,7 +148,7 @@ open class KeystoreHomeViewModel(
         syncJob?.cancel()
         syncJob = null
         viewModelScope.launch {
-            syncTargetPicker.requestSync { startSession(it.lastHost) }
+            syncTargetPicker.requestSync { startSession(it) }
         }
     }
 
@@ -162,7 +162,7 @@ open class KeystoreHomeViewModel(
             // original causes of the intermittent sync failures this fixes, and a join here costs
             // nothing.
             syncJob?.cancelAndJoin()
-            startSession(device.lastHost)
+            startSession(device)
         }
     }
 
@@ -179,9 +179,15 @@ open class KeystoreHomeViewModel(
         syncSessionState.value = SyncSessionState.Idle
     }
 
-    private fun startSession(host: String) {
+    /**
+     * Runs the session against the chosen record, not its address. [TrustedDevice] has no id — the
+     * name is its identity key — and two pairings can hold the same `lastHost`, so handing the
+     * session a bare host let everything downstream (the last-sync stamp, the mTLS pin, the sync log
+     * row) re-resolve it to a first match that need not be the device the user tapped.
+     */
+    private fun startSession(device: TrustedDevice) {
         syncJob = viewModelScope.launch {
-            syncKeystores(host).collect { syncSessionState.value = it }
+            syncKeystores(device).collect { syncSessionState.value = it }
         }
     }
 }

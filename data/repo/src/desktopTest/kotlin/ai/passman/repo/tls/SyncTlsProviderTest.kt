@@ -19,6 +19,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
@@ -74,6 +75,47 @@ class SyncTlsProviderTest {
         assertEquals(0, devices.reverificationCalls)
     }
 
+    /**
+     * The pin follows the record the caller hands over, not the address it happens to sit at.
+     *
+     * Two pairings can hold one `lastHost` — [TrustedDevice] has no id, so re-pairing or an edited
+     * address is enough — and pinning the wrong one of the two fails the handshake outright. That is
+     * the failure a user would see after correctly editing the address of the device they *did*
+     * want: sync stays broken for it while nothing on screen explains why. Here the two records
+     * carry different fingerprints, so the pin says unambiguously which record was used.
+     */
+    @Test
+    fun `clientTls pins the device it is given, not the first record at that address`() = runBlocking {
+        val first = TrustedDevice(name = "desktop", fingerprint = "AA:BB:CC:DD", lastHost = SHARED_HOST)
+        val chosen = TrustedDevice(name = "desktop-re-paired", fingerprint = "11:22:33:44", lastHost = SHARED_HOST)
+        val provider = SyncTlsProvider(FakePreferences(), RecordingTrustedDevices(listOf(first, chosen)))
+
+        assertEquals(
+            setOf("11223344"),
+            assertNotNull(provider.clientTls(chosen)).serverPins,
+            "the chosen record's SPKI must be pinned; the first record at that address would pin aabbccdd",
+        )
+        assertEquals(setOf("aabbccdd"), assertNotNull(provider.clientTls(first)).serverPins)
+    }
+
+    /**
+     * The typed-address overload has no record to follow, so an address two pairings claim resolves
+     * to neither rather than to whichever came first — a coin-flip pin the user could not see.
+     */
+    @Test
+    fun `clientTls for a typed address refuses one that two pairings claim`() = runBlocking {
+        val devices = RecordingTrustedDevices(
+            listOf(
+                TrustedDevice(name = "desktop", fingerprint = "AA:BB:CC:DD", lastHost = SHARED_HOST),
+                TrustedDevice(name = "desktop-re-paired", fingerprint = "11:22:33:44", lastHost = SHARED_HOST),
+            ),
+        )
+        val provider = SyncTlsProvider(FakePreferences(), devices)
+
+        assertNull(provider.clientTls(SHARED_HOST))
+        assertNull(provider.deviceForHost(SHARED_HOST))
+    }
+
     private class RecordingTrustedDevices(
         private val devices: List<TrustedDevice>,
     ) : TrustedDevicesRepository {
@@ -84,13 +126,19 @@ class SyncTlsProviderTest {
         override suspend fun getAll(): List<TrustedDevice> = devices
         override suspend fun add(device: TrustedDevice, expectedOwner: PairingOwner) = true
         override suspend fun remove(name: String) = Unit
-        override suspend fun getByHost(host: String): TrustedDevice? = devices.firstOrNull { it.lastHost == host }
+        /** Mirrors production: one match or nothing, never a first match. */
+        override suspend fun getByHost(host: String): TrustedDevice? =
+            devices.filter { it.lastHost == host }.singleOrNull()
         override suspend fun updateLastSync(name: String, host: String, timestampMs: Long) = Unit
         override suspend fun updateHost(name: String, host: String) = Unit
         override suspend fun updateAllowedOps(name: String, allowedOps: Set<String>) = Unit
         override suspend fun markSignedHybridPairingsForReverification() {
             reverificationCalls++
         }
+    }
+
+    private companion object {
+        const val SHARED_HOST = "192.0.2.44"
     }
 
     private class FakePreferences : UserPreferences {

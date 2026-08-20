@@ -1,6 +1,7 @@
 package ai.passman.domain.keystore.repository
 
 import ai.passman.domain.base.model.Outcome
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.domain.crypto.model.EncryptedData
 import ai.passman.domain.keystore.CreateKeyStore
 import ai.passman.domain.keystore.model.KeyStoreInfo
@@ -55,9 +56,14 @@ interface KeystoreRepository {
     suspend fun verifySignatureFile(keystorePath: String, keystoreName: String, keyAlias: String, dataPath: String, signature: String): Outcome<Boolean>
     suspend fun getPublicKeyBytes(): ByteArray
 
-    suspend fun transferKeystores(hostName: String): Outcome<Unit>
-    suspend fun pushKeystores(hostName: String): Outcome<Unit>
-    suspend fun pullKeystores(hostName: String): Outcome<Unit>
+    /**
+     * Bilateral Sync Mode push/pull, against the [TrustedDevice] record the user chose — see
+     * [ai.passman.domain.password.repository.PasswordRepository.pushPasswordDatabase] for why the
+     * record travels rather than its address.
+     */
+    suspend fun transferKeystores(device: TrustedDevice): Outcome<Unit>
+    suspend fun pushKeystores(device: TrustedDevice): Outcome<Unit>
+    suspend fun pullKeystores(device: TrustedDevice): Outcome<Unit>
 
     fun clearKeyStore()
 }

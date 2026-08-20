@@ -68,12 +68,13 @@ class PasswordHomeViewModelTest {
     }
 
     @Test
-    fun `sync with one trusted device starts immediately against its lastHost`() = runTest {
-        coEvery { getSyncTargets.invoke(Unit) } returns listOf(device("desk", host = "10.0.0.7"))
-        every { syncPasswords.invoke("10.0.0.7") } returns emptyFlow()
+    fun `sync with one trusted device starts immediately against that device`() = runTest {
+        val only = device("desk", host = "10.0.0.7")
+        coEvery { getSyncTargets.invoke(Unit) } returns listOf(only)
+        every { syncPasswords.invoke(only) } returns emptyFlow()
         val vm = newVm()
         vm.onSyncClick()
-        verify(exactly = 1) { syncPasswords.invoke("10.0.0.7") }
+        verify(exactly = 1) { syncPasswords.invoke(only) }
     }
 
     @Test
@@ -88,11 +89,38 @@ class PasswordHomeViewModelTest {
 
     @Test
     fun `choosing a device from the chooser starts the session and hides it`() = runTest {
-        every { syncPasswords.invoke("10.0.0.8") } returns emptyFlow()
+        val chosen = device("phone", host = "10.0.0.8")
+        every { syncPasswords.invoke(chosen) } returns emptyFlow()
         val vm = newVm()
-        vm.onSyncTargetChosen(device("phone", host = "10.0.0.8"))
+        vm.onSyncTargetChosen(chosen)
         assertEquals(SyncTargetPickerState.Hidden, vm.syncTargetPicker.state.value)
-        verify(exactly = 1) { syncPasswords.invoke("10.0.0.8") }
+        verify(exactly = 1) { syncPasswords.invoke(chosen) }
+    }
+
+    /**
+     * The whole record reaches the session, not just its address.
+     *
+     * Two pairings can hold one `lastHost` — re-pairing the same physical peer under a new name
+     * leaves a second row with the same host *and* fingerprint — so a session handed only
+     * `10.0.0.9` could not tell "desk" from "desk-re-paired", and everything downstream (the SPKI
+     * pin, the last-sync stamp, the log row) would resolve it by first match. Tapping the second
+     * row has to start a session for the second row.
+     */
+    @Test
+    fun `the tapped device reaches the session even when another pairing shares its host`() = runTest {
+        val first = device("desk", host = "10.0.0.9")
+        val tapped = device("desk-re-paired", host = "10.0.0.9")
+        coEvery { getSyncTargets.invoke(Unit) } returns listOf(first, tapped)
+        every { syncPasswords.invoke(tapped) } returns emptyFlow()
+
+        val vm = newVm()
+        vm.onSyncClick()
+        assertEquals(SyncTargetPickerState.Choosing(listOf(first, tapped)), vm.syncTargetPicker.state.value)
+
+        vm.onSyncTargetChosen(tapped)
+
+        verify(exactly = 1) { syncPasswords.invoke(tapped) }
+        verify(exactly = 0) { syncPasswords.invoke(first) }
     }
 
     @Test

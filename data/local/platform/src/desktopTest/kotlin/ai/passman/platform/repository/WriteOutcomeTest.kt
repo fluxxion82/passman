@@ -4,6 +4,7 @@ import ai.passman.crypto.vault.PasswordVaultCipher
 import ai.passman.crypto.vault.VaultCipher
 import ai.passman.crypto.vault.VaultSession
 import ai.passman.crypto.vault.VaultSessionKey
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.platform.crypto.JvmSha256Service
 import ai.passman.platform.storage.JvmPasswordDatabaseStorage
 import ai.passman.platform.storage.PasswordDatabaseStorage
@@ -294,7 +295,14 @@ class WriteOutcomeTest {
             port: Int,
         ): Outcome<Unit> = error("not a transfer test")
 
-        override suspend fun pullDatabase(hostName: String, port: Int): Outcome<ByteArray> =
+        override suspend fun transferDatabaseBytes(
+            decryptedDatabaseBytes: ByteArray,
+            fileName: String,
+            device: TrustedDevice,
+            port: Int,
+        ): Outcome<Unit> = error("not a transfer test")
+
+        override suspend fun pullDatabase(device: TrustedDevice, port: Int): Outcome<ByteArray> =
             error("not a transfer test")
     }
 

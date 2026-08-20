@@ -249,11 +249,11 @@ class ArtifactSyncClientTest {
         val unpaired = client(FakeTrustedDevices())
 
         assertEquals(
-            "host not paired: $HOST",
+            UNRESOLVED,
             assertIs<Outcome.Error>(unpaired.push(SyncArtifact.Passwords, PAYLOAD, FILE_NAME, HOST, PORT)).message,
         )
         assertEquals(
-            "host not paired: $HOST",
+            UNRESOLVED,
             assertIs<Outcome.Error>(unpaired.pull(SyncArtifact.Passwords, HOST, PORT)).message,
         )
         assertNoNetworkIo()
@@ -558,6 +558,13 @@ class ArtifactSyncClientTest {
 
     private companion object {
         const val HOST = "192.0.2.44"
+
+        /**
+         * The typed-address refusal. One message covers "nobody is at this address" and "two
+         * pairings are", because an address two records claim identifies neither and picking one
+         * would pin an arbitrary SPKI - see `unresolvedHostMessage`.
+         */
+        const val UNRESOLVED = "no single paired device at $HOST - pair it, or pick the device from the sync chooser"
         const val PORT = 2323
         const val FILE_NAME = "staged.db"
         const val FINGERPRINT = "AA:BB:CC:DD"

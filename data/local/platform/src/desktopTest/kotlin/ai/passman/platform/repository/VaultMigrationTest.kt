@@ -7,6 +7,7 @@ import ai.passman.crypto.vault.PasswordVaultCipher
 import ai.passman.crypto.vault.VaultCipher
 import ai.passman.crypto.vault.VaultSession
 import ai.passman.crypto.vault.VaultSessionKey
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.platform.crypto.JvmSha256Service
 import ai.passman.platform.storage.JvmPasswordDatabaseStorage
 import ai.passman.platform.storage.PasswordDatabaseStorage
@@ -399,7 +400,7 @@ class VaultMigrationTest {
         recorder.reset()
         val peer = Json.encodeToString(entries("peer-entry")).encodeToByteArray()
 
-        val outcome = repository(transferService = FakeTransfer(peer)).pullPasswordDatabase("peer-host")
+        val outcome = repository(transferService = FakeTransfer(peer)).pullPasswordDatabase(peerDevice("peer-host"))
 
         assertIs<Outcome.Success<Unit>>(outcome)
         assertTrue(isSuiteFive(storage.read(user)), "a merged sync payload lands as suite 5")
@@ -415,7 +416,7 @@ class VaultMigrationTest {
         val legacy = legacyVault(entries("gmail"))
         val peer = Json.encodeToString(entries("peer-entry")).encodeToByteArray()
 
-        assertIs<Outcome.Success<Unit>>(repository(transferService = FakeTransfer(peer)).pullPasswordDatabase("peer-host"))
+        assertIs<Outcome.Success<Unit>>(repository(transferService = FakeTransfer(peer)).pullPasswordDatabase(peerDevice("peer-host")))
 
         assertContentEquals(legacy, preMigrationFile().readBytes())
         assertTrue(isSuiteFive(storage.read(user)))
@@ -876,7 +877,14 @@ class VaultMigrationTest {
             port: Int,
         ) = Outcome.Success(Unit)
 
-        override suspend fun pullDatabase(hostName: String, port: Int) = Outcome.Success(pullBytes)
+        override suspend fun transferDatabaseBytes(
+            decryptedDatabaseBytes: ByteArray,
+            fileName: String,
+            device: TrustedDevice,
+            port: Int,
+        ) = Outcome.Success(Unit)
+
+        override suspend fun pullDatabase(device: TrustedDevice, port: Int) = Outcome.Success(pullBytes)
     }
 
     private class FakePreferences : UserPreferences {

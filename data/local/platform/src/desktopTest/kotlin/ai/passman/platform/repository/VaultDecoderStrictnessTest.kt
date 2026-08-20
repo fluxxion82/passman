@@ -4,6 +4,7 @@ import ai.passman.crypto.vault.PasswordVaultCipher
 import ai.passman.crypto.vault.VaultCipher
 import ai.passman.crypto.vault.VaultSession
 import ai.passman.crypto.vault.VaultSessionKey
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.platform.crypto.JvmSha256Service
 import ai.passman.platform.storage.JvmPasswordDatabaseStorage
 import ai.passman.platform.transfer.PasswordTransferService
@@ -116,7 +117,7 @@ class VaultDecoderStrictnessTest {
             """[{"id":"1","entryName":"windmill","username":"erin","password":"pw2","website":"","notes":"",""" +
                 """"dateCreated":901,"uuid":"u-2","passkeyBlob":"AAAA"}]"""
 
-        val outcome = repository(transfer = FakeTransfer(peer.encodeToByteArray())).pullPasswordDatabase("peer-host")
+        val outcome = repository(transfer = FakeTransfer(peer.encodeToByteArray())).pullPasswordDatabase(peerDevice("peer-host"))
 
         assertIs<Outcome.Success<Unit>>(outcome, "an upgraded peer's extra field must not fail the pull")
         assertEquals(
@@ -161,7 +162,14 @@ class VaultDecoderStrictnessTest {
             port: Int,
         ) = Outcome.Success(Unit)
 
-        override suspend fun pullDatabase(hostName: String, port: Int) = Outcome.Success(pullBytes)
+        override suspend fun transferDatabaseBytes(
+            decryptedDatabaseBytes: ByteArray,
+            fileName: String,
+            device: TrustedDevice,
+            port: Int,
+        ) = Outcome.Success(Unit)
+
+        override suspend fun pullDatabase(device: TrustedDevice, port: Int) = Outcome.Success(pullBytes)
     }
 
     private class FakePreferences : UserPreferences {

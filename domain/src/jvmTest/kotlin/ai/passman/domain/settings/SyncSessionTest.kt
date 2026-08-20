@@ -5,6 +5,7 @@ package ai.passman.domain.settings
 import ai.passman.domain.base.model.Outcome
 import ai.passman.domain.connectivity.PairingOwner
 import ai.passman.domain.connectivity.model.DeviceIdentityBundle
+import ai.passman.domain.connectivity.model.PairingSecurity
 import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.domain.connectivity.repository.TrustedDevicesRepository
 import ai.passman.domain.connectivity.service.FingerprintService
@@ -45,12 +46,14 @@ class SyncSessionTest {
     // region: test cases
 
     /**
-     * The pairing gate is purely "is this host in the trusted-device table?" - `verifyTrustedFingerprint`
-     * no longer compares fingerprints at all (mTLS SPKI pinning binds the channel instead), so there is
-     * no fingerprint-mismatch branch left to characterize here.
+     * The pairing gate is purely "is the *chosen record* still in the trusted-device table?" -
+     * `verifyTrustedFingerprint` no longer compares fingerprints at all (mTLS SPKI pinning binds the
+     * channel instead), so there is no fingerprint-mismatch branch left to characterize here. It
+     * matches on [TrustedDevice.name], the store's identity key, rather than on the address, which
+     * two records can legitimately share.
      */
     @Test
-    fun `unpaired host is refused before any push or server start`() = runTest {
+    fun `unpaired device is refused before any push or server start`() = runTest {
         val transfer = FakeTransferRepository()
         val push = Script("push", Outcome.Success(Unit))
         val pull = Script("pull", Outcome.Success(Unit))
@@ -67,14 +70,14 @@ class SyncSessionTest {
                 SyncSessionState.Idle,
                 SyncSessionState.Error(
                     TransferFailure.GeneralTransferFailure,
-                    "host not paired: $HOST",
+                    "device not paired: ${PAIRED_DEVICE.name}",
                 ),
             ),
             states,
         )
-        assertEquals(0, push.calls, "push must not run for an unpaired host")
-        assertEquals(0, pull.calls, "pull must not run for an unpaired host")
-        assertEquals(0, transfer.startCount, "server must not start for an unpaired host")
+        assertEquals(0, push.calls, "push must not run for an unpaired device")
+        assertEquals(0, pull.calls, "pull must not run for an unpaired device")
+        assertEquals(0, transfer.startCount, "server must not start for an unpaired device")
         assertEquals(
             0,
             transfer.stopCount,
@@ -685,6 +688,110 @@ class SyncSessionTest {
         assertNull(trusted.lastSyncStamp, "a refused session must never stamp a device")
     }
 
+    /**
+     * The defect this whole change exists for.
+     *
+     * [TrustedDevice] has no id — the name is its identity key — and two records can legitimately
+     * hold one address: `add` dedupes by name, `updateHost` repoints by name with no collision
+     * check, and re-pairing the same physical peer under a new name leaves a second record with the
+     * same host *and* the same fingerprint. The session used to be handed a bare host string and
+     * re-derive the device from it with a first-match lookup, so a success could stamp
+     * [SAME_HOST_DECOY] while the device the user actually tapped kept reading "Never synced" — and
+     * the chooser, which sorts on that stamp, would put the wrong row on top.
+     *
+     * The decoy is deliberately *first* in the store, so any by-host resolution resolves to it.
+     */
+    /**
+     * The chooser reads the trusted-device list once, when it opens. Anything that changes a
+     * pairing after that — most importantly a peer's keys being marked for re-verification — leaves
+     * the record the user taps older than the store. Since the sync client dispatches on
+     * `pairingSecurity` and pins `fingerprint`, running a session on the tapped copy would act on a
+     * pairing state the store had already moved past.
+     */
+    @Test
+    fun `the session runs on the stored record, not the chooser's copy of it`() = runTest {
+        val transfer = FakeTransferRepository()
+        val reverified = PAIRED_DEVICE.copy(pairingSecurity = PairingSecurity.AwaitingConfirmation)
+        val trusted = FakeTrustedDevices(reverified)
+        val push = Script("push", Outcome.Success(Unit), onCall = { transfer.handshake.value = true })
+        val pull = Script("pull", Outcome.Success(Unit))
+
+        session(
+            transfer,
+            trusted = trusted,
+            push = push,
+            pull = pull,
+            // The stale copy the chooser handed over, still claiming the old pairing state.
+            device = PAIRED_DEVICE,
+        ).toList()
+
+        assertEquals(
+            PairingSecurity.AwaitingConfirmation,
+            push.lastDevice?.pairingSecurity,
+            "push was handed the chooser's stale copy; a pairing marked for re-verification " +
+                "would sync anyway",
+        )
+        assertEquals(PairingSecurity.AwaitingConfirmation, pull.lastDevice?.pairingSecurity)
+    }
+
+    @Test
+    fun `a successful session stamps the device it was given, not another record sharing its host`() = runTest {
+        val transfer = FakeTransferRepository()
+        val trusted = FakeTrustedDevices(SAME_HOST_DECOY, PAIRED_DEVICE)
+        val push = Script("push", Outcome.Success(Unit), onCall = { transfer.handshake.value = true })
+        val pull = Script("pull", Outcome.Success(Unit))
+
+        val states = session(
+            transfer,
+            trusted = trusted,
+            push = push,
+            pull = pull,
+            device = PAIRED_DEVICE,
+        ).toList()
+
+        assertIs<SyncSessionState.Success>(states.last())
+        assertEquals(
+            Triple(PAIRED_DEVICE.name, HOST, 0L),
+            trusted.lastSyncStamp,
+            "the stamp must name the record the session was given - a by-host lookup would have " +
+                "stamped '${SAME_HOST_DECOY.name}' instead and left the tapped device unstamped",
+        )
+    }
+
+    /**
+     * The gate is on the chosen record, not on its address. Only the decoy is still paired here —
+     * the record the user chose has since been removed — so the address is still claimed by
+     * *something*. An address-based gate would wave this session through on the strength of a
+     * pairing nobody selected, and everything after it (the SPKI pin, the stamp, the log row) would
+     * then be acting for that other pairing.
+     */
+    @Test
+    fun `the pairing gate follows the chosen record, not another pairing at the same address`() = runTest {
+        val transfer = FakeTransferRepository()
+        val trusted = FakeTrustedDevices(SAME_HOST_DECOY)
+        val push = Script("push", Outcome.Success(Unit))
+        val pull = Script("pull", Outcome.Success(Unit))
+
+        val states = session(
+            transfer,
+            trusted = trusted,
+            push = push,
+            pull = pull,
+            device = PAIRED_DEVICE,
+        ).toList()
+
+        assertEquals(
+            SyncSessionState.Error(
+                TransferFailure.GeneralTransferFailure,
+                "device not paired: ${PAIRED_DEVICE.name}",
+            ),
+            states.last(),
+        )
+        assertEquals(0, push.calls, "an unpaired record must not sync just because its old address is still claimed")
+        assertEquals(0, transfer.startCount)
+        assertNull(trusted.lastSyncStamp)
+    }
+
     // endregion
 
     // region: harness
@@ -694,8 +801,9 @@ class SyncSessionTest {
         trusted: TrustedDevicesRepository = FakeTrustedDevices(PAIRED_DEVICE),
         push: Script,
         pull: Script,
+        device: TrustedDevice = PAIRED_DEVICE,
     ): Flow<SyncSessionState> = runSyncSession(
-        host = HOST,
+        device = device,
         trustedDevices = trusted,
         fingerprintService = FakeFingerprintService,
         transferRepository = transfer,
@@ -711,6 +819,17 @@ class SyncSessionTest {
         const val HOST = "192.168.1.42"
         val PAIRED_DEVICE = TrustedDevice(
             name = "laptop",
+            fingerprint = "AA:BB:CC",
+            lastHost = HOST,
+        )
+
+        /**
+         * The same physical peer, re-paired under a new name: same address, same fingerprint, a
+         * second row. Nothing in the store prevents this, which is why a lookup keyed on either of
+         * those fields cannot tell the two apart.
+         */
+        val SAME_HOST_DECOY = TrustedDevice(
+            name = "laptop-re-paired",
             fingerprint = "AA:BB:CC",
             lastHost = HOST,
         )
@@ -751,7 +870,12 @@ private class Script(
     var calls: Int = 0
         private set
 
-    suspend fun invoke(): Outcome<Unit> {
+    /** The record the session actually handed over on the most recent call. */
+    var lastDevice: TrustedDevice? = null
+        private set
+
+    suspend fun invoke(device: TrustedDevice): Outcome<Unit> {
+        lastDevice = device
         val index = calls
         if (index > scripted.lastIndex && !repeatLast) {
             throw AssertionError(
@@ -793,16 +917,29 @@ private class FakeTransferRepository(private val startFailure: Throwable? = null
 
 }
 
-private class FakeTrustedDevices(private val device: TrustedDevice?) : TrustedDevicesRepository {
+/**
+ * A trusted-device store that holds a real *list*.
+ *
+ * It used to hold a single device and answer [getByHost] with it for any address at all, which is
+ * precisely what hid the bug this fake now has to be able to show: with one device standing in for
+ * every host, a session that re-derived its device from an address could never be caught landing on
+ * the wrong record, because there was only ever one record to land on. [getByHost] here mirrors
+ * production's rule instead — one match or nothing, never a first match.
+ */
+private class FakeTrustedDevices(private val devices: List<TrustedDevice>) : TrustedDevicesRepository {
+    constructor(device: TrustedDevice?) : this(listOfNotNull(device))
+    constructor(vararg devices: TrustedDevice) : this(devices.toList())
+
     /** (name, host, timestampMs) of the last [updateLastSync] call, or null if never stamped. */
     var lastSyncStamp: Triple<String, String, Long>? = null
         private set
 
     override fun observeAll(): Flow<List<TrustedDevice>> = emptyFlow()
-    override suspend fun getAll(): List<TrustedDevice> = listOfNotNull(device)
+    override suspend fun getAll(): List<TrustedDevice> = devices
     override suspend fun add(device: TrustedDevice, expectedOwner: PairingOwner) = true
     override suspend fun remove(name: String) = Unit
-    override suspend fun getByHost(host: String): TrustedDevice? = device
+    override suspend fun getByHost(host: String): TrustedDevice? =
+        devices.filter { it.lastHost == host }.singleOrNull()
     override suspend fun updateLastSync(name: String, host: String, timestampMs: Long) {
         lastSyncStamp = Triple(name, host, timestampMs)
     }

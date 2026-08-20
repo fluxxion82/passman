@@ -1,6 +1,7 @@
 package ai.passman.domain.password.repository
 
 import ai.passman.domain.base.model.Outcome
+import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.domain.password.AddPassword
 import ai.passman.domain.password.model.PasswordEntry
 
@@ -60,7 +61,23 @@ interface PasswordRepository {
      * offered the user.
      */
     suspend fun deletePasswordEntries(passwordUuids: Collection<String>): Int
+    /**
+     * One-way send to a **typed address** (Settings > Transfer), which is the only sync-adjacent
+     * path with no chosen [TrustedDevice] to carry. The implementation has to resolve the address to
+     * a pairing before it can pin anything, and an address that does not identify exactly one
+     * pairing is refused rather than guessed at.
+     */
     suspend fun transferPasswordDatabase(hostName: String): Outcome<Unit>
-    suspend fun pushPasswordDatabase(hostName: String): Outcome<Unit>
-    suspend fun pullPasswordDatabase(hostName: String): Outcome<Unit>
+
+    /**
+     * Bilateral Sync Mode push/pull, against the [TrustedDevice] record the user chose.
+     *
+     * The record, not its [TrustedDevice.lastHost]: the transport pins the peer's SPKI from the
+     * device it is handed, and re-deriving that device from an address is a first-match lookup over
+     * a field two pairings can legitimately share. Pinning the wrong one of two same-host pairings
+     * fails the handshake outright, which is how editing the address of the *correct* device could
+     * leave sync permanently broken for it.
+     */
+    suspend fun pushPasswordDatabase(device: TrustedDevice): Outcome<Unit>
+    suspend fun pullPasswordDatabase(device: TrustedDevice): Outcome<Unit>
 }

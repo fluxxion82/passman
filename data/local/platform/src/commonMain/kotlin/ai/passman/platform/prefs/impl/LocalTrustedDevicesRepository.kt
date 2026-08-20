@@ -138,8 +138,31 @@ class LocalTrustedDevicesRepository(
         readableStore()?.let(::loadAll).orEmpty()
     }
 
+    /**
+     * One match, or nothing — never a first match.
+     *
+     * Two records really can claim one address: [add] dedupes on [TrustedDevice.name], [updateHost]
+     * repoints on name with no collision check, and re-pairing the same physical peer under a new
+     * name produces a second record holding the same `lastHost` *and* the same fingerprint. A
+     * `firstOrNull` here answered one of them arbitrarily, and every caller that trusted the answer
+     * — the last-sync stamp, the mTLS SPKI pin, the sync log's device name — could then act on a
+     * pairing the user never chose. Those callers now carry the chosen [TrustedDevice] instead, and
+     * what is left for this method is resolving a *typed* address, where there is no chosen record
+     * and an ambiguous answer is worse than none: pinning one of two indistinguishable pairings
+     * would fail the handshake for reasons the user cannot see. Refusing lets the caller say the
+     * address does not identify one paired device.
+     */
     override suspend fun getByHost(host: String): TrustedDevice? = withContext(coroutinesContextFacade.io) {
-        readableStore()?.let(::loadAll)?.firstOrNull { it.lastHost == host }
+        val matches = readableStore()?.let(::loadAll)?.filter { it.lastHost == host }.orEmpty()
+        if (matches.size > 1) {
+            // The host is not logged: this line goes to a log the peer material must not reach.
+            KLogger.w {
+                "${matches.size} paired devices claim the same address; refusing to resolve it to one " +
+                    "of them - pick the device explicitly instead"
+            }
+            return@withContext null
+        }
+        matches.singleOrNull()
     }
 
     override suspend fun add(device: TrustedDevice, expectedOwner: PairingOwner): Boolean =
