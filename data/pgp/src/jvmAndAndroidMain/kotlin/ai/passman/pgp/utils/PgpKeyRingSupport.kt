@@ -2,6 +2,7 @@ package ai.passman.pgp.utils
 
 import org.bouncycastle.openpgp.PGPUtil
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.EOFException
 import java.io.InputStream
 
@@ -72,15 +73,44 @@ private const val ALGORITHM_OFFSET_V3 = 7 // version, creation (4), validity (2)
 private const val ALGORITHM_OFFSET_V4 = 5 // version, creation (4)
 
 /**
+ * The largest blob this will decode. A key ring is kilobytes; a huge RSA collection is still well
+ * under this. The cap exists because this runs on a file the *user picked* and on Android the
+ * process dies of an allocation long before a `runCatching` could turn it into an answer — and the
+ * decoder is the first thing to touch the bytes, so the limit has to be here rather than in the
+ * caller.
+ */
+private const val MAX_KEY_RING_BYTES = 8 * 1024 * 1024
+
+/**
  * Reads [source] — armored or binary — and reports whether this build can use every key in it.
  *
  * Never throws: a stream that cannot be read at all is [PgpKeyRingSupport.NotAKeyRing], which is
- * the honest answer for the caller either way.
+ * the honest answer for the caller either way. So is a blob past [MAX_KEY_RING_BYTES]: nothing that
+ * large is a key ring anyone means to import.
  */
 fun inspectKeyRingSupport(source: InputStream): PgpKeyRingSupport = runCatching {
-    val packets = PGPUtil.getDecoderStream(source).use { it.readBytes() }
+    val packets = PGPUtil.getDecoderStream(source).use { it.readCapped(MAX_KEY_RING_BYTES) }
+        ?: return@runCatching PgpKeyRingSupport.NotAKeyRing
     inspectKeyRingPackets(packets)
 }.getOrElse { PgpKeyRingSupport.NotAKeyRing }
+
+/**
+ * Every byte of the stream, or null once it is clear there are more than [limit] of them.
+ *
+ * Reads one byte past the limit rather than trusting any declared size: the length an armored
+ * stream decodes to is not known up front, and a `readBytes()` here would allocate whatever the
+ * file dictates before anyone could object.
+ */
+private fun InputStream.readCapped(limit: Int): ByteArray? {
+    val buffer = ByteArrayOutputStream()
+    val chunk = ByteArray(DEFAULT_BUFFER_SIZE)
+    while (true) {
+        val read = read(chunk)
+        if (read < 0) return buffer.toByteArray()
+        if (buffer.size() + read > limit) return null
+        buffer.write(chunk, 0, read)
+    }
+}
 
 /** [inspectKeyRingSupport] over bytes already in hand. */
 fun inspectKeyRingSupport(bytes: ByteArray): PgpKeyRingSupport =
@@ -91,7 +121,16 @@ private fun inspectKeyRingPackets(packets: ByteArray): PgpKeyRingSupport {
     var sawKeyPacket = false
 
     while (true) {
-        val packet = reader.next() ?: break
+        // Anything other than a clean end of input means the rest of the file is unaccounted for,
+        // and "the part I could read looked fine" is not an answer this function is allowed to
+        // give: an indeterminate or partial length is a legal way to make the walker stop early,
+        // so treating it as EOF would let a key packet in the tail hide an unknown algorithm
+        // behind a supported ring. Only a genuine end of input can produce Supported.
+        val packet = when (val next = reader.next()) {
+            is PacketRead.Packet -> next
+            PacketRead.EndOfInput -> break
+            PacketRead.Unreadable -> return PgpKeyRingSupport.NotAKeyRing
+        }
         if (packet.tag !in KEY_PACKET_TAGS) continue
         sawKeyPacket = true
 
@@ -104,21 +143,29 @@ private fun inspectKeyRingPackets(packets: ByteArray): PgpKeyRingSupport {
     return if (sawKeyPacket) PgpKeyRingSupport.Supported else PgpKeyRingSupport.NotAKeyRing
 }
 
-private class Packet(val tag: Int, val body: ByteArray) {
+/** What one step of [PacketReader] produced. */
+private sealed interface PacketRead {
+    /** Nothing left, and nothing was skipped to get here. */
+    data object EndOfInput : PacketRead
 
-    /**
-     * The algorithm byte, or null if the body is too short or the version is one nobody has
-     * defined. v4, v5 (LibrePGP) and v6 all place it directly after the 4-byte creation time;
-     * only v2/v3 differ, by carrying a validity period first.
-     */
-    fun algorithmId(): Int? {
-        val version = body.firstOrNull()?.toInt()?.and(0xFF) ?: return null
-        val offset = when (version) {
-            2, 3 -> ALGORITHM_OFFSET_V3
-            4, 5, 6 -> ALGORITHM_OFFSET_V4
-            else -> return null
+    /** A length form this walker cannot step over, so the remainder cannot be vouched for. */
+    data object Unreadable : PacketRead
+
+    data class Packet(val tag: Int, val body: ByteArray) : PacketRead {
+        /**
+         * The algorithm byte, or null if the body is too short or the version is one nobody has
+         * defined. v4, v5 (LibrePGP) and v6 all place it directly after the 4-byte creation time;
+         * only v2/v3 differ, by carrying a validity period first.
+         */
+        fun algorithmId(): Int? {
+            val version = body.firstOrNull()?.toInt()?.and(0xFF) ?: return null
+            val offset = when (version) {
+                2, 3 -> ALGORITHM_OFFSET_V3
+                4, 5, 6 -> ALGORITHM_OFFSET_V4
+                else -> return null
+            }
+            return body.getOrNull(offset)?.toInt()?.and(0xFF)
         }
-        return body.getOrNull(offset)?.toInt()?.and(0xFF)
     }
 }
 
@@ -131,9 +178,9 @@ private class PacketReader(private val bytes: ByteArray) {
 
     private var position = 0
 
-    /** The next packet, or null at end of input. Throws [EOFException] on a truncated header. */
-    fun next(): Packet? {
-        if (position >= bytes.size) return null
+    /** The next step. Throws [EOFException] on a truncated or desynchronised header. */
+    fun next(): PacketRead {
+        if (position >= bytes.size) return PacketRead.EndOfInput
 
         val header = readByte()
         // Bit 7 is set on every packet header. Anything else means we have lost sync, and guessing
@@ -144,15 +191,16 @@ private class PacketReader(private val bytes: ByteArray) {
         val tag = if (newFormat) header and 0x3F else (header shr 2) and 0x0F
         val length = if (newFormat) newFormatLength() else oldFormatLength(header and 0x03)
 
-        // An indeterminate or partial length is legal only on data packets, never on a key packet.
-        // Treat it as the end of anything we can reason about.
-        if (length == null) return null
+        // An indeterminate or partial length runs to the end of the input, or continues in chunks
+        // this walker does not follow. Either way the bytes after it are unaccounted for, so the
+        // caller must not conclude anything about them. Neither form is legal on a key packet.
+        if (length == null) return PacketRead.Unreadable
 
         val end = position + length
         if (length < 0 || end > bytes.size) throw EOFException("packet runs past end of input")
         val body = bytes.copyOfRange(position, end)
         position = end
-        return Packet(tag, body)
+        return PacketRead.Packet(tag, body)
     }
 
     private fun readByte(): Int {

@@ -96,6 +96,38 @@ class PgpKeyRingSupportTest {
         assertEquals(PgpKeyRingSupport.NotAKeyRing, inspectKeyRingSupport(full.copyOf(full.size / 2)))
     }
 
+    @Test
+    fun `an indeterminate-length packet cannot hide an unknown algorithm in the tail`() {
+        // 0xBB: old format, tag 14 (public subkey), length type 3 — "runs to end of input". A
+        // walker that treated that as a clean stop would vouch for the supported ring in front of
+        // it and never look at the v6 ML-KEM key behind it.
+        val hidden = developerRingBytes() +
+            byteArrayOf(0xBB.toByte()) +
+            keyPacket(tag = TAG_PUBLIC_SUBKEY, version = 6, algorithm = ML_KEM)
+
+        assertEquals(PgpKeyRingSupport.NotAKeyRing, inspectKeyRingSupport(hidden))
+    }
+
+    @Test
+    fun `a partial-length packet cannot hide an unknown algorithm in the tail`() {
+        // 0xCE: new format, tag 14. 0xE1 is in the 224..254 partial-length range, which continues
+        // in chunks this walker deliberately does not follow.
+        val hidden = developerRingBytes() +
+            byteArrayOf(0xCE.toByte(), 0xE1.toByte()) +
+            keyPacket(tag = TAG_PUBLIC_SUBKEY, version = 4, algorithm = ML_KEM)
+
+        assertEquals(PgpKeyRingSupport.NotAKeyRing, inspectKeyRingSupport(hidden))
+    }
+
+    @Test
+    fun `a blob far too large to be a key ring is refused without decoding all of it`() {
+        // The guard runs on a file the user picked, before anything is copied. Nine megabytes of
+        // plausible-looking packets must not become nine megabytes of heap on a phone.
+        val oversized = ByteArray(9 * 1024 * 1024) { 0xB0.toByte() }
+
+        assertEquals(PgpKeyRingSupport.NotAKeyRing, inspectKeyRingSupport(oversized))
+    }
+
     // ---- fixtures -------------------------------------------------------------------------
 
     /** The bundled key as binary packets, so crafted packets can be appended to a real ring. */

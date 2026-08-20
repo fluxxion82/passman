@@ -347,11 +347,6 @@ internal fun runSyncSession(
     // redundant.
     var started = false
 
-    // The address to talk to is a property of the chosen record, never a separate parameter that
-    // could disagree with it. Read once here so every state this flow emits, every retry and the
-    // final stamp all name the same address as the pin the transport is about to use.
-    val host = device.lastHost
-
     return flow {
         emit(SyncSessionState.Idle)
 
@@ -366,6 +361,13 @@ internal fun runSyncSession(
         // populated - a pairing marked for re-verification in between must refuse this session, not
         // run it on the copy that predates the mark.
         val paired = (verify as Outcome.Success<TrustedDevice>).value
+
+        // The address comes off the *stored* record too, never the chooser's copy. Taking it from
+        // the copy meant a host the user edited while the dialog sat open was ignored for the
+        // stamp - and since updateLastSync writes lastHost back, a successful sync then silently
+        // reverted their edit. Every state this flow emits, every retry and the final stamp now
+        // name the same address as the pin the transport uses.
+        val host = paired.lastHost
 
         try {
             // NonCancellable, not a plain suspend call: withContext still checks
