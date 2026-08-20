@@ -10,6 +10,8 @@ kotlin {
     applyDefaultHierarchyTemplate()
     android {
         namespace = "ai.passman.design"
+        // Android resource/asset processing is enabled for every Compose module by the
+        // `passman.compose` convention plugin - this module's composeResources depend on it.
     }
     jvm("desktop")
     iosArm64()
