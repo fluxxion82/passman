@@ -124,6 +124,27 @@ object PgpKeys {
         val bakey = FileInputStream(File(publicKeyPath)).use { inputStream ->
             PGPUtil.getDecoderStream(inputStream).readBytes()
         }
+
+        // Refuse to encrypt to a ring carrying an algorithm this build cannot read, rather than
+        // encrypting to whatever survived.
+        //
+        // The selection below walks what BouncyCastle hands back, and for a v4 ring BC drops a
+        // subkey with an unknown algorithm *along with every subkey after it*, reporting the ring
+        // as whole. So the key picked here could be an earlier subkey the peer has since moved off,
+        // or the primary via the fallback path - and the peer may then be unable to decrypt what we
+        // send, for a reason nothing on either side would explain.
+        //
+        // Guarding here rather than when the ring arrives is deliberate. Sync copies key files
+        // byte-for-byte (DirectoryBundler.bundle does not re-encode), so a ring from a newer peer
+        // round-trips losslessly and storing it costs nothing; refusing it at the door would block
+        // the user's own key material and stop two devices converging. Holding the ring is safe.
+        // Using it is not.
+        val support = inspectKeyRingSupport(bakey)
+        require(support !is PgpKeyRingSupport.UnsupportedAlgorithm) {
+            "this key uses algorithm ${(support as PgpKeyRingSupport.UnsupportedAlgorithm).algorithmId}, " +
+                "which this version cannot read; refusing to encrypt to it"
+        }
+
         val objectFactory = PGPObjectFactory(bakey, BcKeyFingerprintCalculator())
 
         // Prefer a key whose usage flags explicitly allow encryption; fall back to any
