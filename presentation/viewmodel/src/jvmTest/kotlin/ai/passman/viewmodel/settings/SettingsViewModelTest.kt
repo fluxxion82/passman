@@ -600,6 +600,8 @@ private class FakeBiometricUnlockRepository(
     override suspend fun biometricUnlockState(username: String) =
         BiometricUnlockState(availability = availability, enrolled = enrolled)
 
+    override suspend fun biometricAvailability() = availability
+
     override suspend fun enable(username: String, password: String): Outcome<Unit> {
         enableCalls += username to password
         if (availability != BiometricAvailability.Available) {
@@ -614,4 +616,13 @@ private class FakeBiometricUnlockRepository(
         disableCalls += username
         enrolled = false
     }
+
+    override suspend fun enrolmentOffered(username: String) = username in offered
+
+    override suspend fun recordEnrolmentOffered(username: String) {
+        offered += username
+    }
+
+    /** The settings toggle never consults this; it is here so the fake satisfies the contract. */
+    private val offered = mutableSetOf<String>()
 }

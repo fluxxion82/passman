@@ -38,9 +38,12 @@ class BiometricUnlock(
 ) {
 
     suspend fun state(username: String): BiometricUnlockState = BiometricUnlockState(
-        availability = bioAuthService.canAuthenticate(),
+        availability = availability(),
         enrolled = store.read(username) != null,
     )
+
+    /** The device half of [state], for callers with no account to ask about yet. */
+    suspend fun availability(): BiometricAvailability = bioAuthService.canAuthenticate()
 
     /**
      * Seal [masterPassword] under a fresh biometric-gated key for [username].
@@ -113,6 +116,17 @@ class BiometricUnlock(
      * fails at the sensor.
      */
     suspend fun disable(username: String) = clear(username)
+
+    /**
+     * Whether [username] has already had its one chance to be offered enrolment.
+     *
+     * A pass-through to the store, kept on this class rather than wiring the store into
+     * [LocalUserRepository] as well: everything else about enrolment is decided here, and a second
+     * holder of the same preferences file is a second place for the key naming to drift.
+     */
+    suspend fun enrolmentOffered(username: String): Boolean = store.enrolmentOffered(username)
+
+    suspend fun recordEnrolmentOffered(username: String) = store.recordEnrolmentOffered(username)
 
     private suspend fun clear(username: String) {
         runCatching { store.remove(username) }

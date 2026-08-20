@@ -60,13 +60,31 @@ class LocalBiometricUnlockPreferences(
         settings.remove(key(username))
     }
 
+    /**
+     * A separate key from the wrapped blob, in the same store.
+     *
+     * Sharing the blob's key would tie "was asked" to "is enrolled", and the two have to come
+     * apart: switching the feature off in settings removes the blob, and that must not hand the
+     * account a fresh round of prompts on its next login.
+     */
+    override suspend fun enrolmentOffered(username: String): Boolean = withContext(coroutinesContextFacade.io) {
+        settings.getBoolean(offeredKey(username), defaultValue = false)
+    }
+
+    override suspend fun recordEnrolmentOffered(username: String) = withContext(coroutinesContextFacade.io) {
+        settings.putBoolean(offeredKey(username), true)
+    }
+
     @Serializable
     private data class StoredWrappedSecret(val ciphertext: String, val iv: String)
 
     private fun key(username: String) = "$WRAPPED_SECRET_PREFIX$username"
 
+    private fun offeredKey(username: String) = "$OFFERED_PREFIX$username"
+
     private companion object {
         const val PREFS_NAME = "biometric_unlock"
         const val WRAPPED_SECRET_PREFIX = "wrapped_"
+        const val OFFERED_PREFIX = "offered_"
     }
 }

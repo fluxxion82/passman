@@ -1,5 +1,7 @@
 package ai.passman.design.login
 
+import ai.passman.design.biometric.BiometricEnrolmentOfferDialog
+import ai.passman.design.core.BiometricUnlockAction
 import ai.passman.design.core.PasswordVisibilityToggle
 import ai.passman.design.core.formKeyboardNavigation
 import ai.passman.design.core.passmanButtonColors
@@ -53,12 +55,21 @@ fun LoginContent(
      * as a device with no sensor.
      */
     canBioAuth: Boolean = false,
+    /**
+     * The one-time enrolment offer, raised between a successful password login and the jump into
+     * the app. Defaulted off so previews and any caller without the plumbing never see it.
+     */
+    biometricOfferVisible: Boolean = false,
+    isEnrollingBiometric: Boolean = false,
     onUsernameChange: (String) -> Unit,
     onPasswordChange: (String) -> Unit,
     onLogin: () -> Unit,
     onBioAuth: () -> Unit = {},
+    onBiometricOfferAccepted: () -> Unit = {},
+    onBiometricOfferDeclined: () -> Unit = {},
 ) {
     var passwordVisibility by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
     val usernameFocusRequester = remember { FocusRequester() }
     val passwordFocusRequester = remember { FocusRequester() }
     var suggestionsRequested by remember { mutableStateOf(false) }
@@ -193,12 +204,28 @@ fun LoginContent(
                 PasswordVisualTransformation()
             },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            // Two actions, so a Row rather than the single slot the field expects. The fingerprint
+            // sits where a banking app puts it — inside the field the password would otherwise be
+            // typed into — because a button below the form is a button nobody looks for.
             trailingIcon = {
-                PasswordVisibilityToggle(
-                    visible = passwordVisibility,
-                    onToggle = { passwordVisibility = !passwordVisibility },
-                    contentDescription = "password visibility",
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    PasswordVisibilityToggle(
+                        visible = passwordVisibility,
+                        onToggle = { passwordVisibility = !passwordVisibility },
+                        contentDescription = "password visibility",
+                    )
+                    if (canBioAuth) {
+                        BiometricUnlockAction(
+                            onClick = {
+                                // Same focus clear as the Login button: the system prompt takes the
+                                // window, and returning to a screen with a stale soft keyboard over
+                                // it is jarring.
+                                focusManager.clearFocus()
+                                onBioAuth()
+                            },
+                        )
+                    }
+                }
             },
             label = {
                 Text("Password", color = MaterialTheme.colorScheme.onSurface) // stringResource(R.string.password_hint)
@@ -215,7 +242,6 @@ fun LoginContent(
                 color = MaterialTheme.colorScheme.onPrimary,
             )
         } else {
-            val focusManager = LocalFocusManager.current
             Button(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -239,29 +265,14 @@ fun LoginContent(
                     fontWeight = FontWeight.Bold
                 )
             }
+        }
 
-            if (canBioAuth) {
-                Button(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 50.dp, top = 10.dp, end = 50.dp),
-                    shape = RoundedCornerShape(80),
-                    colors = passmanButtonColors(containerColor = MaterialTheme.colorScheme.surface),
-                    onClick = {
-                        // Same focus clear as the Login button: the system prompt takes the window,
-                        // and returning to a screen with a stale soft keyboard over it is jarring.
-                        focusManager.clearFocus()
-                        onBioAuth()
-                    },
-                ) {
-                    Text(
-                        text = "Unlock with biometrics",
-                        fontSize = 18.sp,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-            }
+        if (biometricOfferVisible) {
+            BiometricEnrolmentOfferDialog(
+                isEnrolling = isEnrollingBiometric,
+                onEnable = onBiometricOfferAccepted,
+                onNotNow = onBiometricOfferDeclined,
+            )
         }
     }
 }

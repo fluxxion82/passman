@@ -1,6 +1,7 @@
 package ai.passman.domain.user.repository
 
 import ai.passman.domain.base.model.Outcome
+import ai.passman.domain.user.models.BiometricAvailability
 import ai.passman.domain.user.models.BiometricUnlockState
 
 /**
@@ -21,6 +22,15 @@ interface BiometricUnlockRepository {
     suspend fun biometricUnlockState(username: String): BiometricUnlockState
 
     /**
+     * What the device can do, with no account in the picture.
+     *
+     * Separate from [biometricUnlockState] because the signup form has no account to ask about: it
+     * is deciding whether to draw a checkbox for a name that does not exist yet, and answering that
+     * through a per-account query would mean inventing a username to ask about.
+     */
+    suspend fun biometricAvailability(): BiometricAvailability
+
+    /**
      * Verify [password] against the stored credential and, only if it holds, wrap it under a
      * freshly generated biometric-gated key. Prompts.
      */
@@ -31,4 +41,17 @@ interface BiometricUnlockRepository {
      * account whose enrolment has already been invalidated out from under it.
      */
     suspend fun disable(username: String)
+
+    /**
+     * Whether [username] has already been offered enrolment on its way into the app.
+     *
+     * Stored rather than inferred, and stored per account, because the question this answers is
+     * "has this person already said no?" — which nothing else on this interface records. It
+     * outlives [disable] deliberately: an account that switched the feature off in settings has
+     * answered, and must not be asked again at every login for having done so.
+     */
+    suspend fun enrolmentOffered(username: String): Boolean
+
+    /** Remember that [username] has been asked, whatever the answer turns out to be. */
+    suspend fun recordEnrolmentOffered(username: String)
 }

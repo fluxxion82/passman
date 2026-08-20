@@ -8,6 +8,8 @@ import ai.passman.domain.user.GetBiometricUnlockState
 import ai.passman.domain.user.GetKnownUsernames
 import ai.passman.domain.user.LoginAttemptThrottle
 import ai.passman.domain.user.LoginUser
+import ai.passman.domain.user.OfferBiometricUnlock
+import ai.passman.domain.user.SetBiometricUnlock
 import ai.passman.domain.user.exception.AuthFailure
 import ai.passman.viewmodel.base.BaseViewModel
 import ai.passman.viewvo.login.LoginNavigation
@@ -27,6 +29,8 @@ open class LoginViewModel(
     private val getKnownUsernames: GetKnownUsernames,
     private val loginAttemptThrottle: LoginAttemptThrottle,
     private val getBiometricUnlockState: GetBiometricUnlockState,
+    private val offerBiometricUnlock: OfferBiometricUnlock,
+    private val setBiometricUnlock: SetBiometricUnlock,
 ) : BaseViewModel() {
     val navigation = Channel<LoginNavigation>(Channel.RENDEZVOUS)
 
@@ -48,6 +52,19 @@ open class LoginViewModel(
      * offering the button for the wrong one is a prompt that can only end in a failure message.
      */
     val canBioAuth = MutableStateFlow(false)
+
+    /**
+     * The one-time "unlock with your fingerprint next time?" dialog, raised between a successful
+     * password login and the navigation into the app.
+     *
+     * It lives here rather than after the jump because this is the last frame that still holds the
+     * typed plaintext — once [ai.passman.domain.user.models.AppUser.LoggedIn] is the only record of
+     * the account, the password is a hash and a salt and enrolment would have to ask for it again.
+     */
+    val biometricOfferVisible = MutableStateFlow(false)
+
+    /** Set while the system prompt raised by the offer is up. */
+    val isEnrollingBiometric = MutableStateFlow(false)
 
     /**
      * Cancelled and replaced on every username edit. Without it, a fast typist leaves several reads
@@ -127,7 +144,14 @@ open class LoginViewModel(
                             KLogger.d {
                                 "logged in"
                             }
-                            navigation.send(LoginNavigation.GoToHome)
+                            // [requiresPassword] is also exactly "this path typed a password", and
+                            // that is the only path that can offer enrolment: the biometric one has
+                            // no plaintext to seal and is enrolled by definition. When the offer is
+                            // raised the dialog owns the navigation instead — see
+                            // [onBiometricOfferAccepted] and [onBiometricOfferDeclined].
+                            if (!(requiresPassword && raiseBiometricOffer())) {
+                                navigation.send(LoginNavigation.GoToHome)
+                            }
                         }
                         is UserState.PendingActive -> Unit
                     }
@@ -136,6 +160,63 @@ open class LoginViewModel(
 
             isLoading.value = false
         }
+    }
+
+    /**
+     * Accepting the offer: seal the password the user typed a moment ago.
+     *
+     * No second password field, deliberately — this is the difference between the offer and the
+     * settings toggle, and the reason the offer is worth having. Nothing is taken on trust for it:
+     * [SetBiometricUnlock] still verifies the string against the stored credential before anything
+     * is wrapped.
+     */
+    fun onBiometricOfferAccepted() {
+        if (isEnrollingBiometric.value) return
+        isEnrollingBiometric.value = true
+        viewModelScope.launch {
+            try {
+                // Trimmed the way LoginUser trims it before logging in, or the sealed copy would be
+                // a string this account has never had and every later unlock would fail the
+                // credential check.
+                val outcome = setBiometricUnlock(SetBiometricUnlock.Request.Enable(password.trim()))
+                if (outcome is Outcome.Error) KLogger.d { "biometric enrolment refused: ${outcome.message}" }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: Exception) {
+                KLogger.e(failure) { "biometric enrolment failed" }
+            } finally {
+                isEnrollingBiometric.value = false
+                biometricOfferVisible.value = false
+            }
+            // Whatever the prompt did. The user authenticated before this dialog existed, so a
+            // cancelled or failed enrolment is a setting they did not get, not a login they did not
+            // make — holding them on this screen for it would be punishing them for trying.
+            navigation.send(LoginNavigation.GoToHome)
+        }
+    }
+
+    /** "Not now". The account's one offer is already spent — see [OfferBiometricUnlock]. */
+    fun onBiometricOfferDeclined() {
+        if (isEnrollingBiometric.value) return
+        biometricOfferVisible.value = false
+        viewModelScope.launch { navigation.send(LoginNavigation.GoToHome) }
+    }
+
+    /**
+     * @return true when the dialog is now up and the caller must NOT navigate. A failure to decide
+     * is answered "no": discovering a feature is never worth failing a login that succeeded.
+     */
+    private suspend fun raiseBiometricOffer(): Boolean {
+        val offer = try {
+            offerBiometricUnlock()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            KLogger.e(failure) { "biometric enrolment offer unavailable" }
+            false
+        }
+        biometricOfferVisible.value = offer
+        return offer
     }
 
     private fun refreshBiometricUnlock() {

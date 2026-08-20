@@ -22,6 +22,7 @@ import ai.passman.domain.base.model.Outcome
 import ai.passman.domain.exception.Failure
 import ai.passman.domain.user.exception.AuthFailure
 import ai.passman.domain.user.models.AppUser
+import ai.passman.domain.user.models.BiometricAvailability
 import ai.passman.domain.user.models.BiometricUnlockState
 import ai.passman.domain.user.models.KdfParams
 import ai.passman.domain.user.models.Password
@@ -228,8 +229,16 @@ class LocalUserRepository(
 
     override suspend fun disable(username: String) = biometricUnlock.disable(username)
 
+    override suspend fun enrolmentOffered(username: String): Boolean =
+        biometricUnlock.enrolmentOffered(username)
+
+    override suspend fun recordEnrolmentOffered(username: String) =
+        biometricUnlock.recordEnrolmentOffered(username)
+
     override suspend fun biometricUnlockState(username: String): BiometricUnlockState =
         biometricUnlock.state(username)
+
+    override suspend fun biometricAvailability(): BiometricAvailability = biometricUnlock.availability()
 
     /**
      * A password change rewraps `keyring.pmk` and nothing else.

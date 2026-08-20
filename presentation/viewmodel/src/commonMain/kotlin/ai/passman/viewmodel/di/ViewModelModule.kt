@@ -33,9 +33,19 @@ val viewModelModule = module {
             getKnownUsernames = get(),
             loginAttemptThrottle = get(),
             getBiometricUnlockState = get(),
+            offerBiometricUnlock = get(),
+            setBiometricUnlock = get(),
         )
     }
-    viewModel { SignUpViewModel(signUpUser = get(), validateSignUpCredentials = get()) }
+    viewModel {
+        SignUpViewModel(
+            signUpUser = get(),
+            validateSignUpCredentials = get(),
+            getBiometricAvailability = get(),
+            setBiometricUnlock = get(),
+            recordBiometricUnlockOffered = get(),
+        )
+    }
     viewModel { HomeViewModel(importPgpKeys = get(), importKeystore = get(), logoutUser = get()) }
     viewModel {
         PasswordHomeViewModel(

@@ -38,6 +38,8 @@ fun LoginScreen(navController: NavController, presenter: LoginViewModel, snackba
     val isLoading by presenter.isLoading.collectAsState()
     val knownUsernames by presenter.knownUsernames.collectAsState()
     val canBioAuth by presenter.canBioAuth.collectAsState()
+    val biometricOfferVisible by presenter.biometricOfferVisible.collectAsState()
+    val isEnrollingBiometric by presenter.isEnrollingBiometric.collectAsState()
 
     LoginContent(
         userName = presenter.username,
@@ -45,9 +47,13 @@ fun LoginScreen(navController: NavController, presenter: LoginViewModel, snackba
         isLoading = isLoading,
         knownUsernames = knownUsernames,
         canBioAuth = canBioAuth,
+        biometricOfferVisible = biometricOfferVisible,
+        isEnrollingBiometric = isEnrollingBiometric,
         onUsernameChange = presenter::onUsernameChange,
         onPasswordChange = presenter::onPasswordChange,
         onLogin = presenter::onLogin,
         onBioAuth = presenter::onBioAuth,
+        onBiometricOfferAccepted = presenter::onBiometricOfferAccepted,
+        onBiometricOfferDeclined = presenter::onBiometricOfferDeclined,
     )
 }

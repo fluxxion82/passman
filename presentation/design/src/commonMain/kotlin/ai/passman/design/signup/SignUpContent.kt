@@ -11,9 +11,15 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.TextField
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
@@ -25,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -39,10 +46,19 @@ fun SignUpContent(
     confirmPassword: String,
     passwordStrength: PasswordStrength,
     isLoading: Boolean,
+    /**
+     * Whether this device can do biometrics at all. Drawn only for
+     * [ai.passman.domain.user.models.BiometricAvailability.Available], so a sensorless phone and
+     * every desktop get a form with no checkbox rather than one that is permanently useless.
+     * Defaulted off so previews and any caller without the plumbing see that same form.
+     */
+    biometricOfferable: Boolean = false,
+    enrolBiometric: Boolean = false,
     onUsernameChange:(String) -> Unit,
     onPasswordChange:(String) -> Unit,
     onConfirmPasswordChange:(String) -> Unit,
-    onSignup: () -> Unit
+    onSignup: () -> Unit,
+    onEnrolBiometricChanged: (Boolean) -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -126,6 +142,52 @@ fun SignUpContent(
             label = { Text("Confirm password", color = MaterialTheme.colorScheme.onSurface) },
             singleLine = true,
         )
+
+        if (biometricOfferable) {
+            // Asked here, on the form, rather than as a modal after the account is made: it is one
+            // more decision while the user is already making decisions, and it costs a tap instead
+            // of a dialog. Nothing acts on it until signup succeeds — the enrolment must not land
+            // inside the account bootstrap's rollback contract.
+            Row(
+                modifier = Modifier
+                    .width(280.dp)
+                    .padding(top = 12.dp)
+                    .toggleable(
+                        value = enrolBiometric,
+                        enabled = !isLoading,
+                        role = Role.Checkbox,
+                        onValueChange = onEnrolBiometricChanged,
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // The backdrop is the primary blue, so the stock primary-tinted box would vanish
+                // into it. onPrimary is the readable role here in both schemes (9.90:1 on #00BFFF),
+                // with the checkmark punched back out in primary.
+                Checkbox(
+                    checked = enrolBiometric,
+                    // null: the whole Row is the toggle target, and a second one here would make
+                    // the box unreachable by the row's own click.
+                    onCheckedChange = null,
+                    enabled = !isLoading,
+                    colors = CheckboxDefaults.colors(
+                        checkedColor = MaterialTheme.colorScheme.onPrimary,
+                        uncheckedColor = MaterialTheme.colorScheme.onPrimary,
+                        checkmarkColor = MaterialTheme.colorScheme.primary,
+                    ),
+                )
+                Icon(
+                    imageVector = Icons.Filled.Fingerprint,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.padding(end = 8.dp),
+                )
+                Text(
+                    text = "Unlock with your fingerprint",
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
+            }
+        }
 
         if (isLoading) {
             CircularProgressIndicator(

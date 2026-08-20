@@ -17,4 +17,17 @@ interface BiometricUnlockStore {
     suspend fun read(username: String): WrappedSecret?
     suspend fun write(username: String, wrapped: WrappedSecret)
     suspend fun remove(username: String)
+
+    /**
+     * Whether this account has already been offered enrolment on its way into the app.
+     *
+     * Deliberately not derived from [read]. "Has an enrolment" and "has been asked about one" are
+     * different facts with different lifetimes: turning the feature off in settings clears the
+     * enrolment, and the account must not start being asked again on every login as a result.
+     *
+     * Survives [remove] for the same reason, and is keyed by username like the blob is — one
+     * device, several accounts, one question each.
+     */
+    suspend fun enrolmentOffered(username: String): Boolean
+    suspend fun recordEnrolmentOffered(username: String)
 }

@@ -45,6 +45,8 @@ fun SignupScreen(
     val confirmPassword by presenter.confirmPassword.collectAsState()
     val passwordStrength by presenter.passwordStrength.collectAsState()
     val isLoading by presenter.isLoading.collectAsState()
+    val biometricOfferable by presenter.biometricOfferable.collectAsState()
+    val enrolBiometric by presenter.enrolBiometric.collectAsState()
 
     SignUpContent(
         userName = userName,
@@ -52,9 +54,12 @@ fun SignupScreen(
         confirmPassword = confirmPassword,
         passwordStrength = passwordStrength,
         isLoading = isLoading,
+        biometricOfferable = biometricOfferable,
+        enrolBiometric = enrolBiometric,
         onUsernameChange = presenter::onUsernameChange,
         onPasswordChange = presenter::onPasswordChange,
         onConfirmPasswordChange = presenter::onConfirmPasswordChange,
         onSignup = presenter::onSignupClicked,
+        onEnrolBiometricChanged = presenter::onEnrolBiometricChanged,
     )
 }

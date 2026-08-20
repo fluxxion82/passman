@@ -6,6 +6,8 @@ import ai.passman.domain.user.GetBiometricUnlockState
 import ai.passman.domain.user.GetKnownUsernames
 import ai.passman.domain.user.LoginAttemptThrottle
 import ai.passman.domain.user.LoginUser
+import ai.passman.domain.user.OfferBiometricUnlock
+import ai.passman.domain.user.SetBiometricUnlock
 import ai.passman.domain.user.exception.AuthFailure
 import ai.passman.domain.user.models.AppUser
 import ai.passman.domain.user.models.BiometricAvailability
@@ -55,6 +57,8 @@ class LoginViewModelTest {
             getKnownUsernames = GetKnownUsernames(FakeUserPreferences(usernames)),
             loginAttemptThrottle = LoginAttemptThrottle(timeSource = TestTimeSource()),
             getBiometricUnlockState = biometricState(),
+            offerBiometricUnlock = offerBiometricUnlock(),
+            setBiometricUnlock = setBiometricUnlock(),
         )
 
         runCurrent()
@@ -70,6 +74,8 @@ class LoginViewModelTest {
             getKnownUsernames = GetKnownUsernames(FakeUserPreferences(usernames)),
             loginAttemptThrottle = LoginAttemptThrottle(timeSource = TestTimeSource()),
             getBiometricUnlockState = biometricState(),
+            offerBiometricUnlock = offerBiometricUnlock(),
+            setBiometricUnlock = setBiometricUnlock(),
         )
 
         runCurrent()
@@ -85,6 +91,8 @@ class LoginViewModelTest {
             getKnownUsernames = GetKnownUsernames(FakeUserPreferences(usernames)),
             loginAttemptThrottle = LoginAttemptThrottle(timeSource = TestTimeSource()),
             getBiometricUnlockState = biometricState(),
+            offerBiometricUnlock = offerBiometricUnlock(),
+            setBiometricUnlock = setBiometricUnlock(),
         )
 
         viewModel.onUsernameChange("typed")
@@ -97,12 +105,18 @@ class LoginViewModelTest {
     private fun newVm(
         loginUser: LoginUser,
         throttle: LoginAttemptThrottle = LoginAttemptThrottle(timeSource = TestTimeSource()),
-        biometrics: FakeBiometricUnlockRepository = FakeBiometricUnlockRepository(),
+        // NoHardware by default — the desktop answer — so the login-mechanics tests below see the
+        // plain path. On a device that *could* enrol, a successful password login raises the
+        // enrolment offer instead of navigating, which is what the offer tests further down assert.
+        biometrics: FakeBiometricUnlockRepository =
+            FakeBiometricUnlockRepository(availability = BiometricAvailability.NoHardware),
     ) = LoginViewModel(
         loginUser = loginUser,
         getKnownUsernames = GetKnownUsernames(FakeUserPreferences(emptyList())),
         loginAttemptThrottle = throttle,
         getBiometricUnlockState = biometricState(biometrics),
+        offerBiometricUnlock = offerBiometricUnlock(biometrics),
+        setBiometricUnlock = setBiometricUnlock(biometrics),
     ).apply {
         onUsernameChange("mia")
         onPasswordChange("pw")
@@ -333,9 +347,186 @@ class LoginViewModelTest {
         assertFalse(vm.canBioAuth.value)
     }
 
+    // ------------------------------------------- the one-time enrolment offer
+
+    /** A view model whose login always succeeds, so the tests below are only about the offer. */
+    private fun offeringVm(biometrics: FakeBiometricUnlockRepository): LoginViewModel {
+        val loginUser: LoginUser = mockk()
+        coEvery { loginUser.invoke(any()) } returns Outcome.Success(UserState.LoggedIn)
+        return newVm(loginUser, biometrics = biometrics)
+    }
+
+    /**
+     * The whole point of the feature. Biometric unlock is otherwise reachable only through a
+     * settings toggle nobody goes looking for, so an eligible account is asked once — and asked
+     * here, in the last frame that still holds the password the user typed.
+     */
+    @Test
+    fun `a password login offers enrolment on the way into the app`() = runTest {
+        val biometrics = FakeBiometricUnlockRepository()
+        val vm = offeringVm(biometrics)
+
+        vm.onLogin()
+        runCurrent()
+
+        assertTrue(vm.biometricOfferVisible.value)
+        assertTrue(
+            vm.navigation.tryReceive().isFailure,
+            "the dialog owns the navigation until it is answered",
+        )
+    }
+
+    @Test
+    fun `an account that is already enrolled is not offered`() = runTest {
+        val biometrics = FakeBiometricUnlockRepository().apply { enrolledUsers += "mia" }
+        val vm = offeringVm(biometrics)
+
+        vm.onLogin()
+        runCurrent()
+
+        assertFalse(vm.biometricOfferVisible.value)
+        assertEquals(LoginNavigation.GoToHome, vm.navigation.receive())
+    }
+
+    /** NoHardware is the desktop answer, so this is also "the dialog never appears on desktop". */
+    @Test
+    fun `a device that cannot authenticate is not offered`() = runTest {
+        val biometrics = FakeBiometricUnlockRepository(availability = BiometricAvailability.NoHardware)
+        val vm = offeringVm(biometrics)
+
+        vm.onLogin()
+        runCurrent()
+
+        assertFalse(vm.biometricOfferVisible.value)
+        assertEquals(LoginNavigation.GoToHome, vm.navigation.receive())
+        assertTrue(biometrics.offered.isEmpty(), "an offer that cannot be made must not be spent")
+    }
+
+    /**
+     * "No" has to stick. A prompt that returns at every sign-in is worse than one that never
+     * appears, because the second is only a missed feature and the first is the app arguing.
+     */
+    @Test
+    fun `declining is remembered, so a later login goes straight in`() = runTest {
+        val biometrics = FakeBiometricUnlockRepository()
+        val vm = offeringVm(biometrics)
+
+        vm.onLogin()
+        runCurrent()
+        assertTrue(vm.biometricOfferVisible.value)
+
+        vm.onBiometricOfferDeclined()
+        runCurrent()
+        assertEquals(LoginNavigation.GoToHome, vm.navigation.receive())
+        runCurrent()
+        assertFalse(vm.biometricOfferVisible.value)
+
+        vm.onLogin()
+        runCurrent()
+
+        assertFalse(vm.biometricOfferVisible.value, "this account has already been asked")
+        assertEquals(LoginNavigation.GoToHome, vm.navigation.receive())
+        assertTrue(biometrics.enableCalls.isEmpty(), "declining must not enrol anything")
+    }
+
+    /** Declining is not a failed login: the user authenticated before the dialog existed. */
+    @Test
+    fun `declining still lands the user in the app`() = runTest {
+        val vm = offeringVm(FakeBiometricUnlockRepository())
+
+        vm.onLogin()
+        runCurrent()
+        vm.onBiometricOfferDeclined()
+        runCurrent()
+
+        assertEquals(LoginNavigation.GoToHome, vm.navigation.receive())
+    }
+
+    /** Asking somebody who unlocked with a fingerprint whether they want fingerprint unlock. */
+    @Test
+    fun `a biometric login is never offered enrolment`() = runTest {
+        val biometrics = FakeBiometricUnlockRepository().apply { enrolledUsers += "mia" }
+        val vm = offeringVm(biometrics).apply { onPasswordChange("") }
+
+        vm.onBioAuth()
+        runCurrent()
+
+        assertFalse(vm.biometricOfferVisible.value)
+        assertEquals(LoginNavigation.GoToHome, vm.navigation.receive())
+        assertTrue(biometrics.offered.isEmpty(), "the offer was never even considered")
+    }
+
+    /**
+     * The difference between this dialog and the settings toggle, and the reason it is worth
+     * having: the password is already in hand, so there is no second field to fill in. It is
+     * trimmed the way LoginUser trims it, or the sealed copy would be a string this account has
+     * never had and every later unlock would fail the credential check.
+     */
+    @Test
+    fun `accepting enrols with the password already typed`() = runTest {
+        val biometrics = FakeBiometricUnlockRepository()
+        val vm = offeringVm(biometrics).apply { onPasswordChange("  pw  ") }
+
+        vm.onLogin()
+        runCurrent()
+        vm.onBiometricOfferAccepted()
+        runCurrent()
+
+        assertEquals(listOf("mia" to "pw"), biometrics.enableCalls)
+        assertEquals(LoginNavigation.GoToHome, vm.navigation.receive())
+        runCurrent()
+        assertFalse(vm.biometricOfferVisible.value)
+        assertFalse(vm.isEnrollingBiometric.value)
+    }
+
+    @Test
+    fun `a refused prompt still lands the user in the app`() = runTest {
+        val biometrics = FakeBiometricUnlockRepository().apply {
+            enableFailure = Outcome.Error("Biometric unlock was cancelled", AuthFailure.BioAuthCancelled)
+        }
+        val vm = offeringVm(biometrics)
+
+        vm.onLogin()
+        runCurrent()
+        vm.onBiometricOfferAccepted()
+        runCurrent()
+
+        assertEquals(LoginNavigation.GoToHome, vm.navigation.receive())
+        runCurrent()
+        assertFalse(vm.biometricOfferVisible.value)
+        assertFalse(vm.isEnrollingBiometric.value)
+    }
+
+    /** Same rule one level cruder: even an enrolment that throws must not strand the user. */
+    @Test
+    fun `an enrolment that fails outright still lands the user in the app`() = runTest {
+        val biometrics = FakeBiometricUnlockRepository().apply {
+            enableThrows = IllegalStateException("no foreground activity to host the prompt")
+        }
+        val vm = offeringVm(biometrics)
+
+        vm.onLogin()
+        runCurrent()
+        vm.onBiometricOfferAccepted()
+        runCurrent()
+
+        assertEquals(LoginNavigation.GoToHome, vm.navigation.receive())
+        runCurrent()
+        assertFalse(vm.isEnrollingBiometric.value)
+    }
+
     private fun biometricState(
         biometrics: FakeBiometricUnlockRepository = FakeBiometricUnlockRepository(),
     ) = GetBiometricUnlockState(biometrics, FakeUserPreferences(emptyList()))
+
+    /** Both offer use cases resolve the account from preferences, so the fake has to be signed in. */
+    private fun offerBiometricUnlock(
+        biometrics: FakeBiometricUnlockRepository = FakeBiometricUnlockRepository(),
+    ) = OfferBiometricUnlock(biometrics, FakeUserPreferences(emptyList()))
+
+    private fun setBiometricUnlock(
+        biometrics: FakeBiometricUnlockRepository = FakeBiometricUnlockRepository(),
+    ) = SetBiometricUnlock(biometrics, FakeUserPreferences(emptyList()))
 }
 
 /** Enrolment is per account, so the fake is keyed by username rather than a single flag. */
@@ -344,10 +535,27 @@ private class FakeBiometricUnlockRepository(
 ) : BiometricUnlockRepository {
     val enrolledUsers = mutableSetOf<String>()
 
+    /** Accounts whose one-time enrolment offer has been spent. */
+    val offered = mutableSetOf<String>()
+
+    /** Every (username, password) pair enrolment was attempted with, in order. */
+    val enableCalls = mutableListOf<Pair<String, String>>()
+
+    /** Set to make the system prompt refuse — a cancel, a lockout, a mismatched password. */
+    var enableFailure: Outcome.Error? = null
+
+    /** Set to make the enrolment call blow up rather than answer. */
+    var enableThrows: Exception? = null
+
     override suspend fun biometricUnlockState(username: String) =
         BiometricUnlockState(availability = availability, enrolled = username in enrolledUsers)
 
+    override suspend fun biometricAvailability() = availability
+
     override suspend fun enable(username: String, password: String): Outcome<Unit> {
+        enableCalls += username to password
+        enableThrows?.let { throw it }
+        enableFailure?.let { return it }
         enrolledUsers += username
         return Outcome.Success(Unit)
     }
@@ -355,12 +563,19 @@ private class FakeBiometricUnlockRepository(
     override suspend fun disable(username: String) {
         enrolledUsers -= username
     }
+
+    override suspend fun enrolmentOffered(username: String) = username in offered
+
+    override suspend fun recordEnrolmentOffered(username: String) {
+        offered += username
+    }
 }
 
 private class FakeUserPreferences(
     private val usernames: List<String>,
 ) : UserPreferences {
-    override suspend fun getUser(): AppUser = unsupported()
+    /** The account a successful login has just recorded — what the offer use cases resolve. */
+    override suspend fun getUser(): AppUser = AppUser.LoggedIn("mia", Password(hash = "h", salt = "s"))
     override suspend fun upsert(user: AppUser) = unsupported()
     override suspend fun getStoredCredentials(username: String): Password? = unsupported()
     override suspend fun getKnownUsernames(): List<String> = usernames

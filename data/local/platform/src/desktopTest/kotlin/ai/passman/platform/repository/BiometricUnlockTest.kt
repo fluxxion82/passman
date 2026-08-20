@@ -242,6 +242,54 @@ class BiometricUnlockTest {
         assertEquals("a new master password", recovered.value)
     }
 
+    // ------------------------------------------------- the one-time enrolment offer
+
+    @Test
+    fun `an account is not offered until it has been`() = runBlocking {
+        assertFalse(unlock.enrolmentOffered(user))
+
+        unlock.recordEnrolmentOffered(user)
+
+        assertTrue(unlock.enrolmentOffered(user))
+    }
+
+    /** One question per account: asking one must not silence the other. */
+    @Test
+    fun `recording one account's offer leaves another account's alone`() = runBlocking {
+        unlock.recordEnrolmentOffered(user)
+
+        assertFalse(unlock.enrolmentOffered("bob"))
+    }
+
+    /**
+     * The flag records that the user was *asked*, not that they are enrolled. Turning the feature
+     * off in settings is an answer; re-asking at every login because of it is the nagging the flag
+     * exists to prevent.
+     */
+    @Test
+    fun `turning biometric unlock off does not un-ask the offer`() = runBlocking {
+        unlock.recordEnrolmentOffered(user)
+        unlock.enroll(user, masterPassword)
+
+        unlock.disable(user)
+
+        assertFalse(unlock.state(user).enrolled)
+        assertTrue(unlock.enrolmentOffered(user), "the account has already been asked once")
+    }
+
+    /** Same reason, for the case the user did not choose: the key going away is not a new answer. */
+    @Test
+    fun `an invalidated enrolment does not un-ask the offer`() = runBlocking {
+        unlock.recordEnrolmentOffered(user)
+        unlock.enroll(user, masterPassword)
+        service.unlockFailure = BioAuthFailure.PermanentlyInvalidated
+
+        unlock.unlock(user)
+
+        assertNull(store.read(user))
+        assertTrue(unlock.enrolmentOffered(user))
+    }
+
     private object UnconfinedFacade : CoroutinesContextFacade {
         override val io: CoroutineContext = Dispatchers.Unconfined
         override val main: CoroutineContext = Dispatchers.Unconfined
