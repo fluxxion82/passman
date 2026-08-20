@@ -10,8 +10,6 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /** One row of the picker list. Carries what the user needs to recognise an entry, and nothing else. */
@@ -76,14 +74,14 @@ class SecretPickerViewModel(
     private val getPasswordEntries: GetPasswordEntries,
 ) : BaseViewModel() {
 
-    private val _visible = MutableStateFlow(false)
-    val visible: StateFlow<Boolean> = _visible.asStateFlow()
+    val visible: StateFlow<Boolean>
+        field = MutableStateFlow(false)
 
-    private val _query = MutableStateFlow("")
-    val query: StateFlow<String> = _query.asStateFlow()
+    val query: StateFlow<String>
+        field = MutableStateFlow("")
 
-    private val _rows = MutableStateFlow<List<SecretPickerRow>>(emptyList())
-    val rows: StateFlow<List<SecretPickerRow>> = _rows.asStateFlow()
+    val rows: StateFlow<List<SecretPickerRow>>
+        field = MutableStateFlow(emptyList())
 
     /**
      * The session's outcome, as an event rather than as state.
@@ -99,8 +97,8 @@ class SecretPickerViewModel(
      * collecting is dropped, and a value buffered for a collector that goes away before taking it
      * is not handed to the next one. Both are pinned in `SecretPickerViewModelTest`.
      */
-    private val _result = MutableSharedFlow<SecretPickerResult>(replay = 0, extraBufferCapacity = 1)
-    val result: SharedFlow<SecretPickerResult> = _result.asSharedFlow()
+    val result: SharedFlow<SecretPickerResult>
+        field = MutableSharedFlow(replay = 0, extraBufferCapacity = 1)
 
     /**
      * The open session's entries. Deliberately not a published state flow: these carry passwords,
@@ -112,7 +110,7 @@ class SecretPickerViewModel(
     /** Start a session. Any leftover query or list from the last one is dropped. */
     fun openPicker() {
         endSession()
-        _visible.value = true
+        visible.value = true
         loadJob = viewModelScope.launch {
             getPasswordEntries().collect { entries ->
                 loadedEntries = entries
@@ -122,7 +120,7 @@ class SecretPickerViewModel(
     }
 
     fun onQueryChanged(query: String) {
-        _query.value = query
+        this.query.value = query
         publishRows()
     }
 
@@ -156,26 +154,26 @@ class SecretPickerViewModel(
      * unread, and dropping this one is the right outcome: the alternative is a growing queue of
      * results — one of them a password — waiting for a collector that may never come back.
      */
-    private fun deliver(result: SecretPickerResult) {
-        _result.tryEmit(result)
+    private fun deliver(outcome: SecretPickerResult) {
+        result.tryEmit(outcome)
     }
 
     private fun endSession() {
         loadJob?.cancel()
         loadJob = null
         loadedEntries = emptyList()
-        _rows.value = emptyList()
-        _query.value = ""
-        _visible.value = false
+        rows.value = emptyList()
+        query.value = ""
+        visible.value = false
     }
 
     private fun publishRows() {
-        val query = _query.value.trim()
-        _rows.value = loadedEntries
+        val filter = query.value.trim()
+        rows.value = loadedEntries
             .filter {
-                query.isEmpty() ||
-                    it.entryName.contains(query, ignoreCase = true) ||
-                    it.username.contains(query, ignoreCase = true)
+                filter.isEmpty() ||
+                    it.entryName.contains(filter, ignoreCase = true) ||
+                    it.username.contains(filter, ignoreCase = true)
             }
             .map { SecretPickerRow(uuid = it.uuid, entryName = it.entryName, username = it.username) }
     }
