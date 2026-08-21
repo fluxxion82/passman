@@ -186,26 +186,38 @@ class JvmKeyStoreClientArtifactLockTest {
      */
     private fun assertHoldsArtifactLockWhileRunning(name: String, call: () -> Unit) {
         val lockFile = File(keystoreDir.parentFile, "${keystoreDir.name}.lock")
-        val running = java.util.concurrent.atomic.AtomicBoolean(true)
         var observed = false
-
-        val worker = kotlin.concurrent.thread {
-            try {
-                runCatching { call() }
-            } finally {
-                running.set(false)
+        // Retried, because a miss is not a failure. The probe samples while the call runs, so an
+        // operation that holds the lock only for microseconds - `deleteKeystore` is a single
+        // `File.delete` - can finish between two samples and be missed entirely. That produced a real
+        // spurious failure on 2026-08-21 ("the probe never once collided with it") on a call site
+        // whose lock was present and correct.
+        //
+        // Missing N times in a row is what stops being plausible; a call that never takes the lock
+        // produces no observation however many times it runs. Every operation probed here is safe to
+        // repeat: they either rewrite the same store or delete an already-deleted file, and each
+        // takes the lock whether or not there is anything left to do.
+        repeat(PROBE_ATTEMPTS) {
+            if (observed) return@repeat
+            val running = java.util.concurrent.atomic.AtomicBoolean(true)
+            val worker = kotlin.concurrent.thread {
+                try {
+                    runCatching { call() }
+                } finally {
+                    running.set(false)
+                }
             }
+            while (running.get() && !observed) {
+                observed = artifactLockIsHeld(lockFile)
+                Thread.onSpinWait()
+            }
+            worker.join(java.util.concurrent.TimeUnit.SECONDS.toMillis(120))
         }
-        while (running.get() && !observed) {
-            observed = artifactLockIsHeld(lockFile)
-            Thread.onSpinWait()
-        }
-        worker.join(java.util.concurrent.TimeUnit.SECONDS.toMillis(120))
 
         assertTrue(
             observed,
-            "$name must hold the artifact-directory lock while it writes; the probe never once " +
-                "collided with it",
+            "$name must hold the artifact-directory lock while it writes; the probe never collided " +
+                "with it across $PROBE_ATTEMPTS attempts",
         )
     }
 
@@ -233,6 +245,9 @@ class JvmKeyStoreClientArtifactLockTest {
     }
 
     private companion object {
+        /** Enough that missing a short lock hold every time stops being plausible. */
+        const val PROBE_ATTEMPTS = 8
+
         const val PASSWORD = "artifact-lock-test-password"
     }
 }

@@ -603,26 +603,32 @@ class LocalPgpRepositoryTest {
      */
     private fun assertHoldsArtifactLockWhileRunning(name: String, call: suspend () -> Unit) {
         val lockFile = File(pgpUserDir.parentFile, "${pgpUserDir.name}.lock")
-        val running = java.util.concurrent.atomic.AtomicBoolean(true)
         var observed = false
-
-        val worker = kotlin.concurrent.thread {
-            try {
-                runCatching { runBlocking { call() } }
-            } finally {
-                running.set(false)
+        // Retried, because a miss is not a failure - see the same helper in
+        // JvmKeyStoreClientArtifactLockTest. A call holding the lock only for microseconds can finish
+        // between two samples; missing N times in a row is what stops being plausible, and a call
+        // that never takes the lock produces no observation however many times it runs.
+        repeat(PROBE_ATTEMPTS) {
+            if (observed) return@repeat
+            val running = java.util.concurrent.atomic.AtomicBoolean(true)
+            val worker = kotlin.concurrent.thread {
+                try {
+                    runCatching { runBlocking { call() } }
+                } finally {
+                    running.set(false)
+                }
             }
+            while (running.get() && !observed) {
+                observed = artifactLockIsHeld(lockFile)
+                Thread.onSpinWait()
+            }
+            worker.join(java.util.concurrent.TimeUnit.SECONDS.toMillis(120))
         }
-        while (running.get() && !observed) {
-            observed = artifactLockIsHeld(lockFile)
-            Thread.onSpinWait()
-        }
-        worker.join(java.util.concurrent.TimeUnit.SECONDS.toMillis(120))
 
         assertTrue(
             observed,
-            "$name must hold the artifact-directory lock while it writes; the probe never once " +
-                "collided with it",
+            "$name must hold the artifact-directory lock while it writes; the probe never collided " +
+                "with it across $PROBE_ATTEMPTS attempts",
         )
     }
 
@@ -823,6 +829,9 @@ class LocalPgpRepositoryTest {
     }
 
     private companion object {
+        /** Enough that missing a short lock hold every time stops being plausible. */
+        const val PROBE_ATTEMPTS = 8
+
         const val UNKNOWN_ALGORITHM_ID = 35
     }
 
