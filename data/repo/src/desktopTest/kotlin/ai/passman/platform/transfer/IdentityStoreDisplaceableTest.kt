@@ -30,6 +30,18 @@ import kotlin.test.assertTrue
  * carries, in its comments, the assertion that would hold if the exclusion did what the design
  * assumed, so the day the underlying defect is fixed they fail loudly and get rewritten rather than
  * quietly going green for a new reason.
+ *
+ * ## What has since changed, and what has not
+ *
+ * `ValidateSignUpCredentials` now refuses a username that is really a path, so **a new account can no
+ * longer be created with any of these names**. That closes the route in, and it is why the fix went
+ * there rather than into another guard.
+ *
+ * The mechanism these tests describe is untouched: `syncExclusions` still compares basename strings
+ * where the filesystem resolves paths. An account created before the rule existed still has a name
+ * like these, and the bypass still applies to it. So these keep documenting a real property of
+ * `unbundle` — they simply construct the account directly instead of through sign-up, which is now
+ * the only way to reach it.
  */
 class IdentityStoreDisplaceableTest {
     private lateinit var tempDir: File
@@ -47,9 +59,11 @@ class IdentityStoreDisplaceableTest {
     /**
      * A username carrying path syntax defeats the exclusion, and sync replaces the identity store.
      *
-     * `ValidateSignUpCredentials` gates the username on **length alone** — there is no character set
-     * rule — so `./alice` is an acceptable account name. Every path in the app then builds from it by
-     * string concatenation:
+     * `./alice` was an acceptable account name when this was written: the username was gated on
+     * length alone. Sign-up refuses it now, so this fixture builds the account directly — the point
+     * is what `unbundle` does with such a directory, which is unchanged and still applies to any
+     * account created before that rule. Every path in the app builds from the username by string
+     * concatenation:
      *
      * - the account directory is `keystore/./alice`, which the filesystem resolves to `keystore/alice`;
      * - `JvmKeystoreLifecycle.keystoreFileName` makes the store `./alice.pfx` inside it, which
@@ -151,8 +165,9 @@ class IdentityStoreDisplaceableTest {
      *
      * So on macOS, which the desktop app ships for, an account whose name contains any decomposable
      * character has an identity store reachable under a spelling its own exclusion set does not
-     * contain. `ValidateSignUpCredentials` gates on `trim()`ed length alone, so such a name is
-     * accepted at sign-up.
+     * contain. Sign-up now refuses non-ASCII usernames for exactly this reason, which is what closes
+     * the route in; the set-level property asserted here is about `syncExclusions` itself and is
+     * unchanged.
      *
      * Asserted at the set level rather than against the filesystem, so it states the same fact on
      * every platform instead of passing for a filesystem-specific reason on one and being vacuous on
