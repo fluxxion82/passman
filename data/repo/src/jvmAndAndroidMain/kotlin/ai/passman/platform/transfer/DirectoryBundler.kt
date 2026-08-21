@@ -4,6 +4,7 @@ import ai.passman.crypto.io.DurableFiles
 import ai.passman.keystore.KeystoreClient
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.nio.file.Files
 import java.security.MessageDigest
 import kotlin.concurrent.withLock
 import java.util.concurrent.ConcurrentHashMap
@@ -379,6 +380,17 @@ object DirectoryBundler {
      */
     private const val MAX_CONFLICT_NAME_BYTES = 200
 
+    /**
+     * Names the file a preserve renames the live artifact onto before it knows what to call it.
+     *
+     * Readable on purpose: if the process dies between the capture and the final rename, this file
+     * is left holding real key material, and [preservedCopies] deliberately still lists it. An
+     * awkward name in the recovery list beats a secret ring hidden behind a name that looks like
+     * scratch.
+     */
+    private const val CAPTURE_PREFIX = "preserving-"
+    private const val CAPTURE_SUFFIX = ".partial"
+
     /** True when [live] already holds exactly what [incoming] would write. */
     internal fun isUnchanged(live: File, incoming: File): Boolean =
         live.isFile &&
@@ -408,15 +420,33 @@ object DirectoryBundler {
         if (!live.isFile) return
 
         val store = conflictStore(destDir).apply { mkdirs() }
-        val preserved = File(store, conflictName(live, relative))
-        if (preserved.isFile && preserved.readBytes().contentEquals(live.readBytes())) {
-            // Already preserved, byte for byte. Verified rather than inferred from the name: the
-            // name carries a digest, and treating a name match as a content match would let one
-            // preserved secret ring be destroyed on the strength of a hash collision.
-            live.delete()
+
+        // Capture first, inspect second — the order is the whole correctness argument.
+        //
+        // Reading the live file to decide what to do and *then* acting on that same path is how
+        // bytes get lost: a foreground key edit can publish a new version in between, and the
+        // action is applied to bytes nobody ever looked at. That is not hypothetical — the PGP
+        // writer publishes secret rings by atomic rename onto exactly this path. An earlier
+        // version of this function ended its equality branch with `live.delete()`, which meant a
+        // version that landed in that window was deleted having never been preserved.
+        //
+        // This rename is atomic, so it takes whatever is genuinely there at that instant. Every
+        // decision after it is made about a file inside the store, at a path no other writer knows.
+        val captured = Files.createTempFile(store.toPath(), CAPTURE_PREFIX, CAPTURE_SUFFIX).toFile()
+        DurableFiles.replace(live, captured)
+
+        val bytes = captured.readBytes()
+        val preserved = File(store, conflictName(bytes, relative))
+        if (preserved.isFile && preserved.readBytes().contentEquals(bytes)) {
+            // This exact version is already in the store. Verified byte for byte rather than
+            // inferred from the name, because the name carries a digest and trusting a name match
+            // would let a collision drop the only copy of a ring. Deleting is safe here in a way it
+            // never was on the live path: this file is one this call created and nothing else can
+            // reach it.
+            captured.delete()
             return
         }
-        DurableFiles.replace(live, preserved)
+        DurableFiles.replace(captured, preserved)
     }
 
     /**
@@ -427,9 +457,9 @@ object DirectoryBundler {
      * replaces another, and the verify above turns that from destruction into a duplicate only if
      * the bytes really match.
      */
-    private fun conflictName(live: File, relative: String): String {
+    private fun conflictName(displaced: ByteArray, relative: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
-            .digest(live.readBytes())
+            .digest(displaced)
             .take(16)
             .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
         val flattened = relative.replace(File.separatorChar, '_').replace('/', '_')

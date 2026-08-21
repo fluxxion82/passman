@@ -241,6 +241,49 @@ class UnbundlePreservesKeyMaterialTest {
         )
     }
 
+    @Test
+    fun `bilateral sync ping-pong keeps every version`() {
+        // Two devices trading versions reaches a state that had no coverage: the live file matches a
+        // copy already in the store. That is the branch where the preserve dedupes, and it used to
+        // do so by deleting the live path outright — an action decided from an earlier read, so a
+        // key edit landing in between was deleted having never been preserved. The preserve now
+        // captures by rename first and only ever deletes a file inside the store.
+        val v0 = ByteArray(64) { 10 }
+        val v1 = ByteArray(64) { 11 }
+        val v2 = ByteArray(64) { 12 }
+        File(destDir, "work_secret_ring.asc").writeBytes(v0)
+
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to v1), destDir)
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to v0), destDir)
+        // Live is v0 again, and v0 is already in the store: the dedupe branch.
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to v2), destDir)
+
+        assertContentEquals(v2, File(destDir, "work_secret_ring.asc").readBytes())
+        val preserved = preservedBytes()
+        assertTrue(preserved.any { it.contentEquals(v0) }, "v0 must still be recoverable")
+        assertTrue(preserved.any { it.contentEquals(v1) }, "v1 must still be recoverable")
+        assertEquals(2, preserved.size, "dedupe must not pile up copies of a version already stored")
+    }
+
+    @Test
+    fun `a capture never leaves the live path deleted without a copy`() {
+        // The store is where a displaced version goes, so an unwritable store must stop the preserve
+        // before the live file is touched, not after. Fails toward keeping bytes.
+        val live = File(destDir, "work_secret_ring.asc").apply { writeBytes(LOCAL) }
+        val store = DirectoryBundler.conflictStore(destDir)
+        // A regular file where the store directory belongs: mkdirs cannot succeed.
+        store.parentFile.mkdirs()
+        store.writeBytes(ByteArray(1))
+
+        runCatching { DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to INBOUND), destDir) }
+
+        assertContentEquals(
+            LOCAL,
+            live.readBytes(),
+            "if the displaced bytes cannot be stored, the live file must be left alone",
+        )
+    }
+
     // ---- helpers ---------------------------------------------------------------------------
 
     /** Every preserved copy for [destDir], whatever the conflict store chooses to name them. */
