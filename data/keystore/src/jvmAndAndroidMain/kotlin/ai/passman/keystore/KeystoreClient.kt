@@ -217,20 +217,5 @@ interface KeystoreClient {
          */
         fun identityStoreName(userName: String): String = "$userName.pfx"
 
-        /**
-         * Whether [keystoreName] would land on [userName]'s identity store.
-         *
-         * Compared case-insensitively because the filesystems this ships on decide that, not the
-         * comparison: on APFS and NTFS `Alice.pfx` and `alice.pfx` are one file, so a check that only
-         * matched the exact spelling would wave through the very write it exists to refuse.
-         *
-         * It is deliberately **not** a resolution-aware check — it cannot be, at this layer. A name
-         * that differs by Unicode normal form still resolves to the same file on those filesystems
-         * and still passes here. That is the same weakness `DirectoryBundler.syncExclusions` has, and
-         * closing it properly means comparing canonical paths rather than names; this guard covers
-         * the case that actually happens, which is a user typing their own account name.
-         */
-        fun isIdentityStoreName(keystoreName: String, userName: String): Boolean =
-            keystoreName.equals(identityStoreName(userName), ignoreCase = true)
     }
 }

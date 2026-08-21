@@ -57,7 +57,14 @@ internal class LocalPreservedCopyRepository(
         val file = resolveInStore(copy, directory) ?: return@withContext false
         // Where it goes is read back off the file, never from copy.originalName. That field exists to
         // be displayed; trusting it would let whatever populated it choose a write destination.
-        runCatching { DirectoryBundler.restorePreserved(file, directory, DirectoryBundler.syncExclusions(user)) }
+        // The exclusion set belongs to the KEYSTORE directory alone. Keystore unbundles pass it, so
+        // an excluded name can never have been displaced there and a copy naming one is debris. PGP
+        // unbundles pass nothing, so `pgp/<user>/alice.pfx` is an ordinary synced file that really can
+        // be displaced — applying the keystore's set there would strand a legitimate copy as
+        // permanently unrestorable, in a directory where that name means nothing special.
+        val exclusions =
+            if (copy.artifact == SyncOps.KEYSTORE) DirectoryBundler.syncExclusions(user) else emptySet()
+        runCatching { DirectoryBundler.restorePreserved(file, directory, exclusions) }
             .onFailure { KLogger.e(it) { "failed to restore preserved copy" } }
             .getOrDefault(false)
     }

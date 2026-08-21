@@ -45,8 +45,8 @@ class LocalKeystoreRepositoryTest {
         override fun getLocalPath(): String = localPath.absolutePath
     }
 
-    private class FakePreferences : UserPreferences {
-        override suspend fun getUser(): AppUser = AppUser.LoggedIn("alice", Password("password", "salt"))
+    private class FakePreferences(private val userName: String = "alice") : UserPreferences {
+        override suspend fun getUser(): AppUser = AppUser.LoggedIn(userName, Password("password", "salt"))
         override suspend fun upsert(user: AppUser) = Unit
         override suspend fun getStoredCredentials(username: String): Password? = null
         override suspend fun getUserState(): UserState? = null
@@ -321,6 +321,119 @@ class LocalKeystoreRepositoryTest {
             identityStore.readBytes(),
             "and must not have touched the identity store on its way to failing",
         )
+    }
+
+    /**
+     * A keystore name is not a path, and treating it as one destroyed *another account's* identity.
+     *
+     * The requested name is concatenated straight into a path — `File(folder, keystoreName)` — and
+     * the guard that came before this one compared whole strings. So `../bob/bob` was a keystore name
+     * that resolved into Bob's directory, matched nothing, and truncated `bob.pfx` with a fresh
+     * store: one user destroying another user's RSA identity from the new-keystore form, while
+     * holding only their own directory's lock. `./alice` reached Alice's own identity store the same
+     * way.
+     *
+     * The guard now resolves the destination with the filesystem and requires it to be a direct child
+     * of the account's keystore directory, which is why every spelling below is refused by the same
+     * check rather than by an enumeration of the tricks.
+     */
+    @Test
+    fun createKeyStore_refusesANameThatIsReallyAPath() = runBlocking {
+        val bobDir = File(localDir, "keystore${File.separator}bob").apply { mkdirs() }
+        val bobIdentity = File(bobDir, "bob.pfx")
+        val bobBytes = ByteArray(64) { 0x5A }
+        bobIdentity.writeBytes(bobBytes)
+        val aliceIdentity = File(keystoreDir, "alice.pfx")
+        val aliceBytes = ByteArray(64) { 0x7F }
+        aliceIdentity.writeBytes(aliceBytes)
+
+        listOf("../bob/bob", "./alice", "alice/../alice", "../bob/bob.pfx").forEach { typed ->
+            val outcome = repository.createKeyStore(
+                ai.passman.domain.keystore.CreateKeyStore.CreateRequest(
+                    keystoreName = typed,
+                    keystorePassword = "traversal-password",
+                    keyAlgorithm = KeystoreKeyAlgorithm.RSA,
+                    keyAlias = "main",
+                    aliasPassword = "traversal-password",
+                    keystoreType = KeyStoreType.PKCS12,
+                ),
+            )
+            assertIs<Outcome.Error>(outcome, "\"$typed\" is a path, not a keystore name, and must be refused")
+        }
+
+        assertContentEquals(bobBytes, bobIdentity.readBytes(), "another account's identity must be untouched")
+        assertContentEquals(aliceBytes, aliceIdentity.readBytes(), "and so must this account's")
+    }
+
+    /**
+     * The Unicode bypass, which a name comparison could not see.
+     *
+     * For the account `café` spelled NFC, a keystore named `café` spelled NFD is a different Kotlin
+     * string but the same file on APFS and NTFS — so a guard that folded only case waved it through
+     * and `createKeyStore` truncated the identity store. Resolving the destination through the
+     * filesystem is what closes it: `getCanonicalPath` returns an existing file's on-disk spelling,
+     * so both forms canonicalise onto the same path.
+     *
+     * The identity store has to exist for that resolution to happen, which is exactly the case worth
+     * guarding — if it does not exist there is nothing to destroy. Both spellings are written with
+     * escapes so an editor cannot normalise the source and leave this comparing a string to itself.
+     */
+    @Test
+    fun createKeyStore_refusesADecomposedSpellingOfTheAccountsOwnName() = runBlocking {
+        val nfc = "caf\u00E9"
+        val nfd = "cafe\u0301"
+        check(nfc.length + 1 == nfd.length) { "precondition: two spellings of one name" }
+
+        val accountDir = File(localDir, "keystore${File.separator}$nfc").apply { mkdirs() }
+        val identity = File(accountDir, "$nfc.pfx")
+        val identityBytes = ByteArray(64) { 0x3C }
+        identity.writeBytes(identityBytes)
+        check(File(accountDir, "$nfd.pfx").exists()) {
+            "precondition: this filesystem resolves both normal forms to one file"
+        }
+
+        val accented = LocalKeystoreRepository(
+            platform = FakePlatform(localDir),
+            userPreferences = FakePreferences(nfc),
+            keyStoreClient = JvmKeyStoreClient(),
+            coroutinesContextFacade = DefaultContextFacade(),
+            keystoreTransferService = FakeTransferService(),
+        )
+
+        val outcome = accented.createKeyStore(
+            ai.passman.domain.keystore.CreateKeyStore.CreateRequest(
+                keystoreName = nfd,
+                keystorePassword = "nfd-password",
+                keyAlgorithm = KeystoreKeyAlgorithm.RSA,
+                keyAlias = "main",
+                aliasPassword = "nfd-password",
+                keystoreType = KeyStoreType.PKCS12,
+            ),
+        )
+
+        assertIs<Outcome.Error>(outcome, "an NFD spelling of the account name resolves onto the identity store")
+        assertContentEquals(identityBytes, identity.readBytes(), "which must therefore be untouched")
+    }
+
+    /**
+     * Import refuses a trailing-dot spelling too.
+     *
+     * `unbundle` trims trailing dots and spaces before matching an inbound entry, because Windows
+     * folds `alice.pfx.` onto `alice.pfx`. Import keeps the source's own filename, so the same
+     * spelling arrives by a different door; the guard trims the same way rather than leaving the two
+     * comparisons to disagree about what names the identity store.
+     */
+    @Test
+    fun importKeystoreFile_refusesATrailingDotSpellingOfTheIdentityStore() = runBlocking {
+        val identity = File(keystoreDir, "alice.pfx")
+        val identityBytes = ByteArray(64) { 0x7F }
+        identity.writeBytes(identityBytes)
+        val incoming = File(localDir, "alice.pfx.").apply { writeBytes(ByteArray(32) { 0x2A }) }
+
+        val outcome = repository.importKeystoreFile(incoming.absolutePath)
+
+        assertIs<Outcome.Error>(outcome, "a trailing-dot spelling names the identity store on Windows")
+        assertContentEquals(identityBytes, identity.readBytes())
     }
 
     /**

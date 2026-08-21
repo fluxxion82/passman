@@ -6,11 +6,17 @@ import ai.passman.domain.keystore.model.KeyStoreType
 import ai.passman.domain.keystore.model.KeystoreKey
 import ai.passman.domain.keystore.model.KeystoreKeyAlgorithm
 import ai.passman.keystore.model.Keystore
+import ai.passman.crypto.io.ArtifactDirectoryBusyException
 import java.io.File
 import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
+import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -108,6 +114,51 @@ class JvmKeyStoreClientArtifactLockTest {
                 keyAlias = "identity",
             )
         }
+
+    /**
+     * A busy directory is a failed `Result`, not an escaping exception.
+     *
+     * `addKeystoreKey` reports failure through `Result`, and the lock can refuse when the budget runs
+     * out. Taken outside the `runCatching` — which is where the wrap first went — that refusal is
+     * thrown at callers who are only prepared for a failed `Result`:
+     * `LocalKeystoreRepository.updateKeystore` does not catch, and `AddKeystoreKeyViewModel` calls it
+     * from a bare `viewModelScope.launch`. A sync holding the lock past its budget was then a crash
+     * on the Add Key button rather than the error the contract promises.
+     *
+     * This test waits out the real budget, which is the only honest way to reach the path: the
+     * production call site takes the default, and a shorter one would be testing a different code
+     * path from the one that crashes.
+     */
+    @Test
+    fun addKeystoreKeyReportsABusyDirectoryAsAFailedResult() {
+        val keystore = existingKeystore()
+        val holderHasIt = CountDownLatch(1)
+        val holderMayRelease = CountDownLatch(1)
+        val holder = thread {
+            ArtifactDirectoryLock.withLock(keystoreDir) {
+                holderHasIt.countDown()
+                holderMayRelease.await(2, TimeUnit.MINUTES)
+            }
+        }
+        assertTrue(holderHasIt.await(30, TimeUnit.SECONDS), "the holder must get the lock first")
+
+        val result = runCatching {
+            client.addKeystoreKey(keystore, "added", PASSWORD, KeystoreKeyAlgorithm.AES)
+        }
+
+        holderMayRelease.countDown()
+        holder.join(TimeUnit.SECONDS.toMillis(60))
+
+        val returned = assertNotNull(
+            result.getOrNull(),
+            "addKeystoreKey must return, not throw, when the artifact directory is busy",
+        )
+        assertTrue(returned.isFailure, "and what it returns must be a failed Result")
+        assertIs<ArtifactDirectoryBusyException>(
+            returned.exceptionOrNull(),
+            "carrying the busy reason, so a caller can tell it from a keystore error",
+        )
+    }
 
     private fun existingKeystore(initialKey: KeystoreKey? = null): Keystore =
         client.createKeyStore(

@@ -150,7 +150,17 @@ object DirectoryBundler {
      * wire bundle - syncing those would clobber the peer's RSA keypair and break decryption of its
      * existing data.
      */
-    fun bundle(sourceDir: File, excludeBaseNames: Set<String> = emptySet()): ByteArray {
+    fun bundle(sourceDir: File, excludeBaseNames: Set<String> = emptySet()): ByteArray =
+        // Reading is a critical section too, and for the same reason writing is. The PGP writers
+        // rewrite a live ring with a truncating FileOutputStream, so a bundle built while one is in
+        // flight reads a PREFIX of it and sends that. The peer's unbundle then installs the truncated
+        // ring as its live one - preserving whatever it displaced, which is no comfort, because the
+        // damage is the file that just arrived. The inbound half of this window is what the preserve
+        // and this lock close; leaving the outbound half open would have shipped the same tear the
+        // other way.
+        withDestinationLock(sourceDir) { bundleLocked(sourceDir, excludeBaseNames) }
+
+    private fun bundleLocked(sourceDir: File, excludeBaseNames: Set<String>): ByteArray {
         require(sourceDir.isDirectory) { "not a directory: $sourceDir" }
         val out = ByteArrayOutputStream()
         ZipOutputStream(out).use { zip ->
@@ -516,7 +526,11 @@ object DirectoryBundler {
      * interleave on one directory.
      *
      * [excludeBaseNames] is the same set [unbundle] refuses inbound, and it is refused here for a
-     * sharper reason. A copy in the store can only have got there by being displaced, and an excluded
+     * sharper reason. The [TEMP_FILE_SUFFIX] rule is applied alongside it, because [unbundle] refuses
+     * both and a restore that honoured only one of them would put a publishing temp file back into a
+     * live artifact directory — debris the writers' own cleanup no longer knows about.
+     *
+     * A copy in the store can only have got there by being displaced, and an excluded
      * file is never displaced — so a store entry naming one is either hand-placed or crash debris,
      * and restoring it writes a file the app treats as device identity. The worst of them is the
      * identity store's own **lock file**: restoring over it renames the locked inode away and installs
@@ -541,7 +555,9 @@ object DirectoryBundler {
         // Matched exactly as unbundle matches an inbound entry name, so the two cannot disagree about
         // what "an excluded file" means and let a path in through one door that the other refuses.
         val resolvedBaseName = File(relative).name.trimEnd('.', ' ').lowercase()
-        if (resolvedBaseName in excludeBaseNames.mapTo(HashSet()) { it.lowercase() }) {
+        if (resolvedBaseName in excludeBaseNames.mapTo(HashSet()) { it.lowercase() } ||
+            resolvedBaseName.endsWith(TEMP_FILE_SUFFIX)
+        ) {
             return@withDestinationLock false
         }
         val target = File(destDir, relative)

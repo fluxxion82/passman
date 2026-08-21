@@ -67,6 +67,56 @@ class LocalKeystoreRepository(
     private fun <T> inKeystoreDirectory(userName: String, block: () -> T): T =
         ArtifactDirectoryLock.withLock(File("$keystoreDir$userName"), block)
 
+    /**
+     * Why a keystore may not be written at [destination], or null if it may.
+     *
+     * Two refusals, both resolved by the **filesystem** rather than compared as strings, because
+     * every bypass of a name-level check found so far came from a name that was really a path.
+     *
+     * 1. **It must be a direct child of the account's own keystore directory.** A requested name is
+     *    concatenated into a path (`File(folder, keystoreName)`), so `../bob/bob` was a keystore name
+     *    that resolved into *another account's* directory and truncated `bob.pfx` — one user
+     *    destroying another's RSA identity from the new-keystore form, while holding only their own
+     *    directory's lock.
+     * 2. **It must not be the account's identity store.** That file holds the RSA key the vault is
+     *    sealed under and nothing else has a copy.
+     *
+     * `canonicalFile` is what makes both checks real. It normalises `..`, and on the filesystems this
+     * ships on it resolves an existing file to its on-disk spelling — so `ALICE.pfx` and an NFD
+     * spelling of `café.pfx` both canonicalise onto the identity store they would overwrite, which a
+     * string comparison could not see. An earlier version of this guard compared names and folded
+     * only case; it was bypassable by Unicode normal form on APFS, which is the default macOS
+     * filesystem and the one the desktop app ships against.
+     *
+     * The identity store existing is what lets its spelling be resolved, and that is exactly the case
+     * worth guarding: if it does not exist there is nothing to destroy.
+     */
+    private fun keystoreDestinationRefusal(destination: File, userName: String): String? {
+        val directory = File("$keystoreDir$userName")
+        val root = canonicalOf(directory)
+        val target = canonicalOf(destination)
+        if (target.parentFile != root) {
+            return "a keystore name may not contain a path; use a plain name"
+        }
+        val identity = KeystoreClient.identityStoreName(userName)
+        if (target == canonicalOf(File(directory, identity))) {
+            return "that name is reserved for your account's identity; choose another"
+        }
+        // Belt and braces on top of the resolution above, matching how `unbundle` normalises an
+        // inbound entry name. Windows folds `alice.pfx.` and `alice.pfx ` onto `alice.pfx`, and
+        // whether canonicalisation reflects that is the platform's business, not something worth
+        // depending on for the one file whose loss cannot be recovered. The comparison is
+        // case-insensitive for the same reason it is in `unbundle`.
+        if (target.name.trimEnd('.', ' ').equals(identity, ignoreCase = true)) {
+            return "that name is reserved for your account's identity; choose another"
+        }
+        return null
+    }
+
+    /** Absolute is the fallback, never the raw path: a relative one resolves against the CWD. */
+    private fun canonicalOf(file: File): File =
+        runCatching { file.canonicalFile }.getOrElse { file.absoluteFile }
+
     override suspend fun createKeyStore(request: CreateKeyStore.CreateRequest): Outcome<KeyStoreInfo> =
         withContext(coroutinesContextFacade.io) {
             val user = userPreferences.getUser() as AppUser.LoggedIn
@@ -77,18 +127,12 @@ class LocalKeystoreRepository(
             // it, and callers compare the two.
             val fileName =
                 if (request.keystoreName.endsWith(".pfx")) request.keystoreName else "${request.keystoreName}.pfx"
-            // A keystore named after the account resolves to `<user>.pfx` — the account's identity
-            // store, which holds the RSA key the vault is sealed under and of which nothing else
-            // holds a copy. `createKeyStore` publishes with a truncating `outputStream()` and takes
-            // no `IdentityStoreLock`, so this was a two-word way for a user to destroy their own
-            // account from an ordinary "new keystore" form. Refused by name, not ordered by lock:
-            // making the overwrite orderly would not make it survivable.
-            if (KeystoreClient.isIdentityStoreName(fileName, user.userName)) {
-                KLogger.e { "refusing to create a keystore at the identity store's own name" }
-                return@withContext Outcome.Error(
-                    "\"${request.keystoreName}\" is reserved for your account's identity; choose another name",
-                    KeystoreFailure.CreateKeystore,
-                )
+            // Resolved and refused before anything is generated or written - see
+            // keystoreDestinationRefusal. Ordering the overwrite with a lock would not make it
+            // survivable; the write simply must not happen.
+            keystoreDestinationRefusal(File(keystorePath, fileName), user.userName)?.let { refusal ->
+                KLogger.e { "refusing to create keystore \"${request.keystoreName}\": $refusal" }
+                return@withContext Outcome.Error(refusal, KeystoreFailure.CreateKeystore)
             }
             // One client call, one PKCS#12 store(): the key goes in before the file is first
             // written, and a failure anywhere leaves no empty store file behind.
@@ -135,12 +179,9 @@ class LocalKeystoreRepository(
             // `<user>.pfx` lands on the account's identity store and REPLACE_EXISTING destroys it.
             // Same refusal as createKeyStore, and for the same reason: the identity store is not a
             // keystore the user may replace by hand.
-            if (KeystoreClient.isIdentityStoreName(source.fileName.toString(), user.userName)) {
-                KLogger.e { "refusing to import over the identity store" }
-                return@runCatching Outcome.Error(
-                    "that file would replace your account's identity; rename it before importing",
-                    KeystoreFailure.CreateKeystore,
-                )
+            keystoreDestinationRefusal(destination.toFile(), user.userName)?.let { refusal ->
+                KLogger.e { "refusing to import \"${source.fileName}\": $refusal" }
+                return@runCatching Outcome.Error(refusal, KeystoreFailure.CreateKeystore)
             }
 
             // Only the write is locked. Everything above inspected the SOURCE path, which is outside

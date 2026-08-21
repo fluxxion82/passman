@@ -111,6 +111,33 @@ class LocalPreservedCopyRepositoryTest {
         assertContentEquals(INBOUND, repository.list().single().let { File(repository.pathOf(it)!!).readBytes() })
     }
 
+    /**
+     * A displaced PGP file named `<user>.pfx` is still restorable.
+     *
+     * Restore refuses recorded paths that name a **keystore** exclusion, because a keystore unbundle
+     * skips those names and a store entry claiming one is debris. PGP unbundles pass no exclusions at
+     * all, so in `pgp/<user>/` that name is an ordinary synced file that genuinely can be displaced —
+     * an exported identity store a user keeps beside their keys, say. Applying the keystore's set
+     * there would strand a legitimate copy as permanently unrestorable, in a directory where the name
+     * means nothing special.
+     *
+     * The copy is planted with a well-formed name so it reaches the check under test rather than
+     * being refused earlier for not parsing.
+     */
+    @Test
+    fun `restores a pgp file whose name is only meaningful in the keystore directory`() = runBlocking {
+        val store = DirectoryBundler.conflictStore(pgpDir).apply { mkdirs() }
+        val planted = File(store, "${"c".repeat(32)}-alice.pfx").apply { writeBytes(LOCAL) }
+        check(DirectoryBundler.hasRecoverablePath(planted)) { "precondition: the planted name must parse" }
+        val copy = repository.list().single { it.id == planted.name }
+
+        assertTrue(
+            repository.restore(copy),
+            "alice.pfx is a keystore exclusion, but this is the PGP directory and it was really displaced",
+        )
+        assertContentEquals(LOCAL, File(pgpDir, "alice.pfx").readBytes())
+    }
+
     @Test
     fun `deletes permanently`() = runBlocking {
         displaceRing()

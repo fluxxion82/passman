@@ -42,8 +42,17 @@ const val ARTIFACT_DIRECTORY_LOCK_BUDGET_MS =
 class ArtifactDirectoryBusyException(message: String) : IllegalStateException(message)
 
 /**
- * Mutual exclusion over one artifact directory — `pgp/<user>/` or `keystore/<user>/` — held by
- * **every** writer into it, sync and foreground alike.
+ * Mutual exclusion over one artifact directory — `pgp/<user>/` or `keystore/<user>/` — held by sync
+ * and by every foreground writer whose target filename is **user-derived or arbitrary**.
+ *
+ * Not literally every writer, and the exception is deliberate rather than an oversight.
+ * `KeyringStore`, `HybridKeyManager` and `MlDsaKeyManager` publish `keyring.pmk`, `keyring.pmk.next`,
+ * `hybrid.key` and `mldsa.key` — compile-time ASCII constants, every one of them in
+ * `DirectoryBundler.syncExclusions`. The bypasses that make that list unreliable for `<user>.pfx` all
+ * turn on a name whose stored spelling differs from the one a peer's entry resolves to, and a
+ * constant cannot differ from itself. Those two key managers also hold a coroutine `Mutex` across
+ * their writes, so wrapping them would add a `loadMutex -> this lock` edge for a race that cannot
+ * occur.
  *
  * ## The race it closes
  *
@@ -121,22 +130,36 @@ object ArtifactDirectoryLock {
      * @throws ArtifactDirectoryBusyException if the lock is still held after
      *   [ARTIFACT_DIRECTORY_LOCK_BUDGET_MS]. Thrown before [block] runs, so nothing was touched.
      */
-    fun <T> withLock(artifactDirectory: File, block: () -> T): T {
+    fun <T> withLock(artifactDirectory: File, block: () -> T): T =
+        withLock(artifactDirectory, ARTIFACT_DIRECTORY_LOCK_BUDGET_MS, block)
+
+    /**
+     * As [withLock], with the wait bounded by [budgetMs] instead of
+     * [ARTIFACT_DIRECTORY_LOCK_BUDGET_MS].
+     *
+     * A **test seam**, and the only reason it is public: the budget is deliberately long enough that
+     * a legitimate holder is never cut off, which makes the contended paths — the busy timeout, and
+     * the single-deadline property below — cost ten seconds apiece to exercise honestly. Production
+     * has no reason to pass this and none of it does.
+     */
+    fun <T> withLock(artifactDirectory: File, budgetMs: Long, block: () -> T): T {
         val lockFile = lockFileFor(artifactDirectory)
         val state = states.computeIfAbsent(canonicalKey(artifactDirectory)) { State() }
-        // Bounded here too. The in-JVM holder is running a critical section that is itself bounded,
-        // so this cannot legitimately be exceeded; making it a timed wait means no path through this
-        // object can hang a key write even if that assumption stops holding.
-        if (!state.monitor.tryLock(ARTIFACT_DIRECTORY_LOCK_BUDGET_MS, TimeUnit.MILLISECONDS)) {
+        // ONE deadline for both stages, not a fresh budget each. Waiting the full budget on the
+        // monitor and then a full budget again on the file lock would make the real worst case twice
+        // what the constant, the KDoc and both exception messages promise - and a bound nobody can
+        // state is not a bound. Whatever the monitor consumes comes out of what the file lock gets.
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMs)
+        if (!state.monitor.tryLock(remainingMillis(deadline), TimeUnit.MILLISECONDS)) {
             throw ArtifactDirectoryBusyException(
                 "artifact directory: ${artifactDirectory.name} was still held by this process after " +
-                    "~$ARTIFACT_DIRECTORY_LOCK_BUDGET_MS ms; another sync or key write is in progress",
+                    "~$budgetMs ms; another sync or key write is in progress",
             )
         }
         try {
             // Only the outermost holder touches the file lock: overlapping locks on one file from
             // one JVM are an error rather than a wait, so a nested acquisition must not ask.
-            if (state.depth == 0) acquire(state, lockFile)
+            if (state.depth == 0) acquire(state, lockFile, deadline)
             state.depth++
             try {
                 return block()
@@ -182,7 +205,11 @@ object ArtifactDirectoryLock {
         return File(parent, "${resolved.name}$LOCK_FILE_SUFFIX")
     }
 
-    private fun acquire(state: State, lockFile: File) {
+    /** Milliseconds left before [deadline], never negative - `tryLock(0, ...)` is a plain poll. */
+    private fun remainingMillis(deadline: Long): Long =
+        TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()).coerceAtLeast(0)
+
+    private fun acquire(state: State, lockFile: File, deadline: Long) {
         // The lock file's own directory, not the artifact directory: the artifact directory may not
         // exist yet (a first sync into a fresh account creates it inside the lock), but its parent
         // has to, because that is where the lock file goes.
@@ -200,6 +227,21 @@ object ArtifactDirectoryLock {
             return
         }
         state.channel = channel
+        // From here on the channel is this object's to close. Every way out of the loop below must go
+        // through release(), including the ones nobody writes on purpose: Thread.sleep throws
+        // InterruptedException, and an interrupt during a contended wait would otherwise unwind out of
+        // acquire with the channel still open and `depth` never incremented, so no later frame closes
+        // it. Repeated interrupted waits leak descriptors until the account stops being writable.
+        try {
+            acquireFileLock(state, channel, lockFile, deadline)
+        } catch (failure: Throwable) {
+            release(state)
+            if (failure is InterruptedException) Thread.currentThread().interrupt()
+            throw failure
+        }
+    }
+
+    private fun acquireFileLock(state: State, channel: FileChannel, lockFile: File, deadline: Long) {
         var attempt = 0
         while (true) {
             val lock = try {
@@ -223,19 +265,14 @@ object ArtifactDirectoryLock {
                 state.fileLock = lock
                 return
             }
-            if (++attempt >= ARTIFACT_DIRECTORY_LOCK_ATTEMPTS) break
+            if (++attempt >= ARTIFACT_DIRECTORY_LOCK_ATTEMPTS || remainingMillis(deadline) == 0L) break
             if (attempt == 1) {
-                KLogger.i {
-                    "artifact directory: ${lockFile.name} is held; waiting up to " +
-                        "~$ARTIFACT_DIRECTORY_LOCK_BUDGET_MS ms"
-                }
+                KLogger.i { "artifact directory: ${lockFile.name} is held; waiting for it" }
             }
-            Thread.sleep(ARTIFACT_DIRECTORY_LOCK_RETRY_DELAY_MS)
+            Thread.sleep(ARTIFACT_DIRECTORY_LOCK_RETRY_DELAY_MS.coerceAtMost(remainingMillis(deadline)))
         }
-        release(state)
         throw ArtifactDirectoryBusyException(
-            "artifact directory: ${lockFile.name} was still held after " +
-                "~$ARTIFACT_DIRECTORY_LOCK_BUDGET_MS ms; another sync or key write is in progress",
+            "artifact directory: ${lockFile.name} was still held; another sync or key write is in progress",
         )
     }
 

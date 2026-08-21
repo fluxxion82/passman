@@ -1,5 +1,6 @@
 package ai.passman.platform.recovery
 
+import ai.passman.crypto.io.ArtifactDirectoryLock
 import ai.passman.crypto.io.DurableFiles
 import ai.passman.crypto.keyring.KeyFileEnvelope
 import ai.passman.crypto.keyring.KeyFilePurpose
@@ -41,7 +42,15 @@ class JvmPortableVaultRecovery(
      * The recovery RSA key and certificate are intentionally preserved, so the CMS vault is not
      * re-encrypted and remains readable through the replacement P12.
      */
-    fun upgrade(username: String, sessionKey: VaultSessionKey): PortableVaultAccess {
+    fun upgrade(username: String, sessionKey: VaultSessionKey): PortableVaultAccess =
+        ArtifactDirectoryLock.withLock(directory(username)) { upgradeLocked(username, sessionKey) }
+
+    /**
+     * Held across the whole upgrade, not just each write. It strands the previous P12 deliberately
+     * when both the swap and the restore fail, so a sync landing between the backup and the
+     * replacement would leave the two halves describing different keys.
+     */
+    private fun upgradeLocked(username: String, sessionKey: VaultSessionKey): PortableVaultAccess {
         val current = material(username, sessionKey)
         if (current.format == PortableVaultRecoveryFormat.Bip39English24) {
             return access(username, current)
@@ -133,7 +142,16 @@ class JvmPortableVaultRecovery(
         }
     }
 
-    private fun create(username: String, sessionKey: VaultSessionKey): RecoveryKeyMaterial {
+    private fun create(username: String, sessionKey: VaultSessionKey): RecoveryKeyMaterial =
+        ArtifactDirectoryLock.withLock(directory(username)) { createLocked(username, sessionKey) }
+
+    /**
+     * Held across the whole creation. The `exists()` check below refuses to run while either file is
+     * present — a partial set is indistinguishable from a half-destroyed one — so deciding that and
+     * then writing must be one critical section, or a sync arriving in between makes the check stale
+     * and the write lands on a file the check said was absent.
+     */
+    private fun createLocked(username: String, sessionKey: VaultSessionKey): RecoveryKeyMaterial {
         check(!p12File(username).exists() && !certificateFile(username).exists()) {
             "portable recovery material is incomplete for $username"
         }
@@ -275,7 +293,30 @@ class JvmPortableVaultRecovery(
         else -> null
     }
 
-    private fun writeAtomically(target: File, bytes: ByteArray) {
+    /**
+     * Publish [bytes] at [target], holding the artifact-directory lock.
+     *
+     * `keystore/<user>/` is a directory sync unbundles into, so every write here has to be ordered
+     * against `unbundle`'s displace-then-install pair. Two of the four filenames this class writes are
+     * **user-derived** — `<user>.recovery.p12` and `<user>.recovery.crt` — and `syncExclusions` is a
+     * basename string comparison, so a username carrying path syntax or a decomposable character
+     * makes them displaceable exactly as `IdentityStoreDisplaceableTest` shows for `<user>.pfx`. The
+     * P12 is this device's recovery private key; a peer's copy landing over a freshly written one
+     * leaves it unopenable by the local record, and the breakage surfaces only when the user actually
+     * needs their recovery phrase.
+     *
+     * Taken here rather than per call site because every write in this class funnels through this
+     * method, which makes the wrap unmissable. The two constant-named files ride along; the lock is
+     * reentrant and costs them nothing, and a per-file exception would be another rule to maintain.
+     * The multi-file operations take it again at their own level so their writes land as one.
+     */
+    private fun writeAtomically(target: File, bytes: ByteArray) = ArtifactDirectoryLock.withLock(
+        checkNotNull(target.parentFile),
+    ) {
+        writeAtomicallyLocked(target, bytes)
+    }
+
+    private fun writeAtomicallyLocked(target: File, bytes: ByteArray) {
         val parent = checkNotNull(target.parentFile)
         parent.mkdirs()
         SecureFiles.ownerOnlyDir(parent)

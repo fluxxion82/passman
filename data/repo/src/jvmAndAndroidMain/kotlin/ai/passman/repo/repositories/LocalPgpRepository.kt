@@ -77,8 +77,9 @@ internal class LocalPgpRepository(
      * itself. This class owns `pgpDir`, so it can name the directory the lock is actually keyed on.
      *
      * The consequence is that a future direct `PgpClient` write from somewhere else would miss the
-     * lock. Every mutating `PgpClient` method is called from this class and nowhere else today, and
-     * `PgpClientArtifactLockTest` pins that.
+     * lock. Every mutating `PgpClient` method is called from this class and nowhere else today, but
+     * nothing enforces that — `LocalPgpRepositoryTest` pins that each call site here takes the lock,
+     * which is not the same guarantee. A new caller of `PgpClient` has to take it too.
      *
      * Read-modify-write callers hold it across the **read** as well: rewriting a ring means parsing
      * the live file and encoding a new one over it, which is only correct if nothing replaces the

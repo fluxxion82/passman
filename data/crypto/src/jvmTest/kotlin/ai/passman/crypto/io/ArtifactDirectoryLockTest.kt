@@ -19,6 +19,10 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ArtifactDirectoryLockTest {
+    /** Long enough to be a real wait, short enough that the contended tests stay fast. */
+    private val SHORT_BUDGET_MS = 400L
+
+
     private lateinit var tempDir: File
     private lateinit var artifactDir: File
 
@@ -281,6 +285,77 @@ class ArtifactDirectoryLockTest {
                 ) {
                     channel.tryLock()
                 }
+            }
+        }
+    }
+
+    /**
+     * Exhausting the budget throws rather than hangs, and leaves the lock usable.
+     *
+     * The release path is what the second half covers: a timeout that left the monitor held would
+     * make the next acquisition hang, so a plain successful acquire afterwards is the evidence.
+     */
+    @Test
+    fun exhaustingTheBudgetThrowsAndLeavesTheLockUsable() {
+        val holderHasIt = CountDownLatch(1)
+        val holderMayRelease = CountDownLatch(1)
+        val holder = thread {
+            ArtifactDirectoryLock.withLock(artifactDir) {
+                holderHasIt.countDown()
+                holderMayRelease.await(2, TimeUnit.MINUTES)
+            }
+        }
+        assertTrue(holderHasIt.await(30, TimeUnit.SECONDS), "the holder must get the lock first")
+
+        assertFailsWith<ArtifactDirectoryBusyException>("a contended wait must end in Busy, not a hang") {
+            ArtifactDirectoryLock.withLock(artifactDir, SHORT_BUDGET_MS) { }
+        }
+
+        holderMayRelease.countDown()
+        holder.join(TimeUnit.SECONDS.toMillis(60))
+
+        var reacquired = false
+        ArtifactDirectoryLock.withLock(artifactDir) { reacquired = true }
+        assertTrue(reacquired, "a timed-out attempt must not leave the lock unusable")
+    }
+
+    /**
+     * The **file-lock** stage honours the caller's budget, not a fixed attempt count.
+     *
+     * The retry loop counts attempts, and the count was tuned to the default budget, so the wait it
+     * produced had nothing to do with the deadline: waiting out the monitor and then waiting the full
+     * attempt count made the real worst case roughly double what the constants, the KDoc and both
+     * exception messages promise. A bound nobody can state is not a bound.
+     *
+     * Isolated to the second stage deliberately. The test thread takes the file lock directly,
+     * outside the registry, leaving the monitor free — so the single waiter passes stage one instantly
+     * and everything measured belongs to stage two. A fixture with two waiters cannot show this:
+     * whichever one holds the monitor holds it for the *whole* of its own file-lock wait, so the
+     * other times out on the monitor and never reaches the stage under test. That is what the first
+     * two versions of this test got wrong, and mutation is what said so both times.
+     */
+    @Test
+    fun theFileLockStageHonoursTheBudgetRatherThanAnAttemptCount() {
+        val lockFile = File(artifactDir.parentFile, "${artifactDir.name}.lock")
+        lockFile.createNewFile()
+
+        FileChannel.open(lockFile.toPath(), StandardOpenOption.WRITE).use { channel ->
+            val outsider = channel.tryLock()
+            assertTrue(outsider != null, "precondition: the file lock must be held from outside the registry")
+            try {
+                val startedAt = System.nanoTime()
+                assertFailsWith<ArtifactDirectoryBusyException> {
+                    ArtifactDirectoryLock.withLock(artifactDir, SHORT_BUDGET_MS) { }
+                }
+                val waitedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+
+                assertTrue(
+                    waitedMs < SHORT_BUDGET_MS * 4,
+                    "the file-lock wait must end at the caller's budget; waited $waitedMs ms against " +
+                        "a budget of $SHORT_BUDGET_MS ms",
+                )
+            } finally {
+                outsider?.release()
             }
         }
     }

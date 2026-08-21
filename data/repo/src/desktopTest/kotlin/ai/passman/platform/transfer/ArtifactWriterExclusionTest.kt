@@ -202,6 +202,60 @@ class ArtifactWriterExclusionTest {
     }
 
     /**
+     * `bundle` takes the lock too, because reading is a critical section here as well.
+     *
+     * The PGP writers rewrite a live ring with a truncating `FileOutputStream`. A bundle built while
+     * one is in flight reads a **prefix** and sends it, and the peer's unbundle installs that
+     * truncated ring as its live one — preserving whatever it displaced, which is no comfort, because
+     * the damaged file is the one that just arrived. Closing the inbound tear and leaving the
+     * outbound one open would have shipped the same corruption the other way.
+     */
+    @Test
+    fun bundleBlocksWhileTheArtifactLockIsHeld() {
+        live.writeBytes(ORIGINAL)
+        val started = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+
+        ArtifactDirectoryLock.withLock(destDir) {
+            thread {
+                started.countDown()
+                DirectoryBundler.bundle(destDir)
+                finished.countDown()
+            }
+            assertTrue(started.await(30, TimeUnit.SECONDS), "the bundling thread must start")
+            assertFalse(
+                finished.await(1, TimeUnit.SECONDS),
+                "bundle must wait for the artifact lock; this directory holds one small file and " +
+                    "would otherwise have been zipped many times over",
+            )
+        }
+        assertTrue(finished.await(30, TimeUnit.SECONDS), "and must proceed once it is released")
+    }
+
+    /**
+     * Restore honours the temp-suffix rule as well as the exclusion set.
+     *
+     * `unbundle` refuses both — an exact-name set plus everything ending in [DirectoryBundler]'s temp
+     * suffix, because a publishing temp carries a random infix no name set can express. A restore
+     * that honoured only the first would put such a file back into a live artifact directory, where
+     * it is debris its writer's own cleanup no longer knows about.
+     */
+    @Test
+    fun restorePreservedRefusesAPublishingTempName() {
+        val store = DirectoryBundler.conflictStore(destDir).apply { mkdirs() }
+        val tempName = "keyring.pmk.4821${DirectoryBundler.TEMP_FILE_SUFFIX}"
+        val planted = File(store, "${"b".repeat(32)}-$tempName").apply { writeBytes(PLANTED) }
+        assertTrue(DirectoryBundler.hasRecoverablePath(planted), "precondition: the name must parse")
+
+        assertFalse(
+            DirectoryBundler.restorePreserved(planted, destDir, DirectoryBundler.syncExclusions("alice")),
+            "a publishing temp name is refused inbound and must be refused on restore too",
+        )
+        assertFalse(File(destDir, tempName).exists(), "and nothing may be written at it")
+        assertTrue(planted.isFile, "the copy stays in the store")
+    }
+
+    /**
      * The control: an ordinary artifact still restores.
      *
      * Without this, a `restorePreserved` that refused everything would satisfy the test above.

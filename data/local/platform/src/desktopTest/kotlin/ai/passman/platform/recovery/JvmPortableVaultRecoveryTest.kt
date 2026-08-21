@@ -35,6 +35,68 @@ class JvmPortableVaultRecoveryTest {
         root.deleteRecursively()
     }
 
+    /**
+     * Creating the recovery material holds `keystore/<user>/`'s artifact-directory lock.
+     *
+     * Two of the four filenames this class writes are **user-derived** — `<user>.recovery.p12` and
+     * `<user>.recovery.crt` — and the sync exclusion list that is supposed to keep them off the wire
+     * is a basename string comparison, so a username carrying path syntax or a decomposable character
+     * makes them displaceable exactly as `IdentityStoreDisplaceableTest` shows for `<user>.pfx`. The
+     * P12 is this device's recovery private key; a peer's copy landing over a freshly written one
+     * leaves it unopenable by the local record, and that surfaces only when the user finally needs
+     * their recovery phrase.
+     *
+     * Observed by probing the OS lock while the call runs rather than by timing it: RSA generation
+     * and two PKCS#12 writes take far longer than any "did it block" threshold would mean anything
+     * against.
+     */
+    @Test
+    fun access_holdsTheArtifactDirectoryLockWhileItWrites() {
+        val session = PasswordVaultCipher().createSession("login-password").sessionKey
+        try {
+            val recovery = JvmPortableVaultRecovery(platform(root), JvmSecureRandomService())
+            val accountDir = File(root, "keystore/work")
+            val lockFile = File(accountDir.parentFile, "${accountDir.name}.lock")
+
+            val running = java.util.concurrent.atomic.AtomicBoolean(true)
+            var observed = false
+            val worker = kotlin.concurrent.thread {
+                try {
+                    runCatching { recovery.access("work", session) }
+                } finally {
+                    running.set(false)
+                }
+            }
+            while (running.get() && !observed) {
+                observed = lockIsHeld(lockFile)
+                Thread.onSpinWait()
+            }
+            worker.join(java.util.concurrent.TimeUnit.SECONDS.toMillis(120))
+
+            assertTrue(observed, "the recovery writer must hold the artifact-directory lock while it writes")
+        } finally {
+            session.destroy()
+        }
+    }
+
+    /** True when some code in this JVM currently holds the OS lock on [lockFile]. */
+    private fun lockIsHeld(lockFile: File): Boolean {
+        if (!lockFile.isFile) return false
+        return try {
+            java.nio.channels.FileChannel.open(
+                lockFile.toPath(),
+                java.nio.file.StandardOpenOption.WRITE,
+            ).use { channel ->
+                val lock = channel.tryLock()
+                if (lock == null) true else { lock.release(); false }
+            }
+        } catch (_: java.nio.channels.OverlappingFileLockException) {
+            true
+        } catch (_: java.io.IOException) {
+            false
+        }
+    }
+
     @Test
     fun ensure_createsAStableSealedRecoveryP12ForTheProfile() {
         val session = PasswordVaultCipher().createSession("login-password").sessionKey

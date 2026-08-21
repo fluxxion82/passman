@@ -429,9 +429,22 @@ class JvmKeyStoreClient : KeystoreClient {
         }
     }
 
-    /** Load, edit and store under one lock — see [inArtifactDirectory] for why the load is inside it. */
+    /**
+     * Load, edit and store under one lock — see [inArtifactDirectory] for why the load is inside it.
+     *
+     * The lock is taken **inside** the `runCatching`, not around it. This method reports failure as a
+     * `Result`, and the lock can refuse when the directory is busy; taken outside, that refusal would
+     * be thrown at callers who are only prepared for a failed `Result` —
+     * `LocalKeystoreRepository.updateKeystore` does not catch, and `AddKeystoreKeyViewModel` calls it
+     * from a bare `viewModelScope.launch`. A sync holding the lock past its budget would then be a
+     * crash on the Add Key button instead of the error the contract promises.
+     */
     override fun addKeystoreKey(keystore: Keystore, keyAlias: String, keyPassword: String, algorithm: KeystoreKeyAlgorithm): Result<Boolean> =
-        inArtifactDirectory(keystore.path) { addKeystoreKeyLocked(keystore, keyAlias, keyPassword, algorithm) }
+        runCatching {
+            inArtifactDirectory(keystore.path) {
+                addKeystoreKeyLocked(keystore, keyAlias, keyPassword, algorithm).getOrThrow()
+            }
+        }
 
     private fun addKeystoreKeyLocked(keystore: Keystore, keyAlias: String, keyPassword: String, algorithm: KeystoreKeyAlgorithm): Result<Boolean> {
         return runCatching {
@@ -513,15 +526,25 @@ class JvmKeyStoreClient : KeystoreClient {
         } ?: false
     }
 
-    /** Load, re-key and publish under one lock — see [inArtifactDirectory] for why the load is inside it. */
+    /**
+     * Load, re-key and publish under one lock — see [inArtifactDirectory] for why the load is inside it.
+     *
+     * Wrapped so a busy directory becomes the `Outcome.Error` this method already promises rather than
+     * a throw, for the same reason as [addKeystoreKey].
+     */
     override fun changeKeystorePassword(
         keystorePath: String,
         keystoreName: String,
         keystoreType: KeyStoreType,
         oldPassword: String,
         newPassword: String,
-    ): Outcome<Unit> = inArtifactDirectory(keystorePath) {
-        changeKeystorePasswordLocked(keystorePath, keystoreName, keystoreType, oldPassword, newPassword)
+    ): Outcome<Unit> = runCatching {
+        inArtifactDirectory(keystorePath) {
+            changeKeystorePasswordLocked(keystorePath, keystoreName, keystoreType, oldPassword, newPassword)
+        }
+    }.getOrElse {
+        KLogger.e(it) { "failed to change keystore password: ${it.localizedMessage}" }
+        Outcome.Error(it.localizedMessage, KeystoreFailure.ChangePasswordFailure)
     }
 
     private fun changeKeystorePasswordLocked(
@@ -662,18 +685,33 @@ class JvmKeyStoreClient : KeystoreClient {
         if (!external.isFile) {
             return Outcome.Error("failed to load keystore", KeystoreFailure.NotFound)
         }
-        // A wrong old password must be an error, not an exception, and must not touch the file — the
-        // migration state machine in LocalUserRepository reads this answer to decide what to do next.
-        val oldKeyStore = runCatching { loadPkcs12(external, oldPassword.toCharArray()) }.getOrElse {
-            return Outcome.Error(it.message ?: "invalid password", AuthFailure.InvalidPassword)
+        // The lock spans the READ as well as the commit. This is a read-modify-write: the bytes
+        // published below are derived from the store loaded here, so a sync landing between the two
+        // would be silently reverted by the commit — the exact shape [inArtifactDirectory] exists to
+        // prevent, and one this method had while `commitIdentityStore` took the lock by itself. It is
+        // reentrant, so that inner acquisition just re-enters.
+        //
+        // The outcome comes back as the lambda's value rather than by an early `return`: the lock
+        // takes a plain (non-inline) lambda, so only a labelled return is legal from inside it.
+        inArtifactDirectory(keystorePath) {
+            // A wrong old password must be an error, not an exception, and must not touch the file —
+            // the migration state machine in LocalUserRepository reads this answer to decide what to
+            // do next.
+            val oldKeyStore = runCatching { loadPkcs12(external, oldPassword.toCharArray()) }.getOrElse {
+                return@inArtifactDirectory Outcome.Error(
+                    it.message ?: "invalid password",
+                    AuthFailure.InvalidPassword,
+                )
+            }
+            val expectedAliases = oldKeyStore.aliases().toList()
+            // Straight from the loaded store to the new bytes. There is no intermediate KeyStore
+            // holding the entries under the new password, so there is nothing a stray `store()` could
+            // write at the provider's own parameters.
+            val encoded =
+                LowPbePkcs12Writer.encode(oldKeyStore, oldPassword.toCharArray(), newPassword.value.toCharArray())
+            commitIdentityStore(folder, external, encoded, newPassword.value, expectedAliases)
+            Outcome.Success(Unit)
         }
-        val expectedAliases = oldKeyStore.aliases().toList()
-        // Straight from the loaded store to the new bytes. There is no intermediate KeyStore holding
-        // the entries under the new password, so there is nothing a stray `store()` could write at
-        // the provider's own parameters.
-        val encoded = LowPbePkcs12Writer.encode(oldKeyStore, oldPassword.toCharArray(), newPassword.value.toCharArray())
-        commitIdentityStore(folder, external, encoded, newPassword.value, expectedAliases)
-        Outcome.Success(Unit)
     }.getOrElse {
         KLogger.e(it) { "failed to change the identity store password: ${it.localizedMessage}" }
         Outcome.Error(it.localizedMessage ?: "change failed", KeystoreFailure.ChangePasswordFailure)
@@ -690,18 +728,27 @@ class JvmKeyStoreClient : KeystoreClient {
             return Outcome.Error("failed to load keystore", KeystoreFailure.NotFound)
         }
         // The cheap half, and the one that runs on every login after the first: reading the algorithm
-        // identifiers out of the file runs no PBE at all.
+        // identifiers out of the file runs no PBE at all. Deliberately outside the lock — it decides
+        // only whether there is work to do and touches nothing, and taking the lock to answer "no"
+        // would put a lock file in every account directory on every login.
         if (!LowPbePkcs12Writer.hasLegacyPbe(external)) {
             return Outcome.Success(Unit)
         }
-        val keyStore = runCatching { loadPkcs12(external, password.value.toCharArray()) }.getOrElse {
-            return Outcome.Error(it.message ?: "invalid password", AuthFailure.InvalidPassword)
+        // Read-modify-write from here on, so the lock spans the load as well as the commit — see
+        // changeIdentityKeyStorePassword for why, and for why the result is a returned value.
+        inArtifactDirectory(keystorePath) {
+            val keyStore = runCatching { loadPkcs12(external, password.value.toCharArray()) }.getOrElse {
+                return@inArtifactDirectory Outcome.Error(
+                    it.message ?: "invalid password",
+                    AuthFailure.InvalidPassword,
+                )
+            }
+            val expectedAliases = keyStore.aliases().toList()
+            val encoded = LowPbePkcs12Writer.encode(keyStore, password.value.toCharArray())
+            commitIdentityStore(folder, external, encoded, password.value, expectedAliases)
+            KLogger.d { "identity store re-encoded at low PBE parameters (${expectedAliases.size} entries)" }
+            Outcome.Success(Unit)
         }
-        val expectedAliases = keyStore.aliases().toList()
-        val encoded = LowPbePkcs12Writer.encode(keyStore, password.value.toCharArray())
-        commitIdentityStore(folder, external, encoded, password.value, expectedAliases)
-        KLogger.d { "identity store re-encoded at low PBE parameters (${expectedAliases.size} entries)" }
-        Outcome.Success(Unit)
     }.getOrElse {
         KLogger.e(it) { "failed to re-encode the identity store: ${it.localizedMessage}" }
         Outcome.Error(it.localizedMessage ?: "re-encode failed", KeystoreFailure.ChangePasswordFailure)

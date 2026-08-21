@@ -504,6 +504,40 @@ class LocalPgpRepositoryTest {
         }
     }
 
+    @Test
+    fun modifyUserId_takesTheArtifactLock() {
+        val pair = runBlocking { repository.getKeys().single() }
+        assertHoldsArtifactLockWhileRunning("modifyUserId") {
+            repository.modifyUserId(
+                pair,
+                "test-password",
+                ai.passman.domain.pgp.model.UserId(name = "Other", email = "other@example.com", isRevoked = false),
+                ai.passman.domain.pgp.model.UserIdAction.ADD,
+            )
+        }
+    }
+
+    @Test
+    fun addSubKey_takesTheArtifactLock() {
+        val pair = runBlocking { repository.getKeys().single() }
+        assertHoldsArtifactLockWhileRunning("addSubKey") {
+            repository.addSubKey(
+                pair,
+                "test-password",
+                ai.passman.domain.pgp.model.PgpKeyAlgorithm.RSA_SIGN,
+                2048,
+                0,
+            )
+        }
+    }
+
+    @Test
+    fun importBundledDeveloperKey_takesTheArtifactLock() {
+        assertHoldsArtifactLockWhileRunning("importBundledDeveloperKey") {
+            repository.importBundledDeveloperKey(force = true)
+        }
+    }
+
     /**
      * Assert [call] actually **holds** the artifact-directory lock while it runs.
      *
