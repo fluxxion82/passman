@@ -161,8 +161,10 @@ class ValidateSignUpCredentials {
          */
         private val RESERVED_DEVICE_NAMES =
             setOf("con", "prn", "aux", "nul") +
-                (0..9).map { "com$it" } +
-                (0..9).map { "lpt$it" }
+                // 1..9, not 0..9: Windows reserves COM1-COM9 and LPT1-LPT9. COM0 and LPT0 are
+                // ordinary names, and refusing them would be the guard rejecting legitimate input.
+                (1..9).map { "com$it" } +
+                (1..9).map { "lpt$it" }
 
         const val MIN_USERNAME_LENGTH = 3
 

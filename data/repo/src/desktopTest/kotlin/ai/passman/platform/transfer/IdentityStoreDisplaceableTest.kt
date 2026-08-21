@@ -33,9 +33,11 @@ import kotlin.test.assertTrue
  *
  * ## What has since changed, and what has not
  *
- * `ValidateSignUpCredentials` now refuses a username that is really a path, so **a new account can no
- * longer be created with any of these names**. That closes the route in, and it is why the fix went
- * there rather than into another guard.
+ * `ValidateSignUpCredentials` now refuses a username that is really a path, and `SignUpUser` — the
+ * use case that owns account creation — enforces it rather than leaving it to the sign-up screen, so
+ * **a new account can no longer be created with any of these names**. That closes the route in, and
+ * it is why the fix went there rather than into another guard. (This sentence was false for one
+ * commit, while the check lived only in `SignUpViewModel`.)
  *
  * The mechanism these tests describe is untouched: `syncExclusions` still compares basename strings
  * where the filesystem resolves paths. An account created before the rule existed still has a name

@@ -321,6 +321,7 @@ val domainModule = module {
     single {
         SignUpUser(
             repository = get(),
+            validateSignUpCredentials = get(),
             getUserState = get(),
             userEventPersistence = get(),
             userPreferences = get(),

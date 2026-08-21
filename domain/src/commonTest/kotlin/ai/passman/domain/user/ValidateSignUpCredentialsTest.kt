@@ -210,6 +210,15 @@ class ValidateSignUpCredentialsTest {
                 "\"$username\" is a reserved device name on Windows and must be refused",
             )
         }
+
+        // Windows reserves COM1-COM9 and LPT1-LPT9. Zero is not reserved, and a guard that refused it
+        // would be rejecting a legitimate name - the failure mode this rule has already had once.
+        listOf("com0", "lpt0").forEach { username ->
+            assertFalse(
+                Issue.UsernameHasIllegalCharacters in validate(username, STRONG_PASSWORD).issues,
+                "\"$username\" is not reserved and must be accepted",
+            )
+        }
     }
 
     /**

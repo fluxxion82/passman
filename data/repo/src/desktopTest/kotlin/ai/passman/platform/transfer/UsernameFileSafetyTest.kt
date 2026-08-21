@@ -28,8 +28,15 @@ import kotlin.test.assertTrue
  * `IDENTITY_STORE_TEMP_SUFFIX`: a duplicated constant across a boundary is only safe while something
  * fails when the copies drift.
  *
- * Each suffix is **observed from the code that creates it**, never spelled here — a test that wrote
- * `".conflicts"` twice would agree with itself and prove nothing.
+ * Each suffix is **observed from the code that creates it**, and only then compared against the
+ * literal. The literals are here — that is the point of a pin — but they are never the only thing
+ * asserted: if `DirectoryBundler`'s constant moved, the observation would no longer equal the literal
+ * and the sanity assertion fails; if `domain`'s copy moved, the observed suffix would no longer be
+ * refused as a username and the rejection assertion fails. Drift in either direction breaks
+ * something, which is the property a duplicated constant needs.
+ *
+ * The staging suffix is the exception and is spelled outright, because nothing exposes it: it is
+ * checked by planting a marker at that path and watching `unbundle` wipe it.
  */
 class UsernameFileSafetyTest {
     private val validate = ValidateSignUpCredentials()

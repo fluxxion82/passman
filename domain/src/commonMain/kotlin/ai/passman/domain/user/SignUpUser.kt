@@ -5,6 +5,7 @@ import ai.passman.domain.base.invoke
 import ai.passman.domain.base.model.Outcome
 import ai.passman.domain.initialization.models.UserState
 import ai.passman.domain.pgp.ImportDeveloperKey
+import ai.passman.domain.user.exception.AuthFailure
 import ai.passman.domain.user.models.UserEvent
 import ai.passman.domain.user.persistences.UserEventPersistence
 import ai.passman.domain.user.repository.UserPreferences
@@ -16,6 +17,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 class SignUpUser(
     private val repository: UserRepository,
+    private val validateSignUpCredentials: ValidateSignUpCredentials,
     private val userPreferences: UserPreferences,
     private val userEventPersistence: UserEventPersistence,
     private val getUserState: GetUserState,
@@ -32,10 +34,27 @@ class SignUpUser(
         data class Standard(val email: String, val password: String) : SignUpRequest()
     }
     override suspend fun invoke(param: SignUpRequest): Outcome<UserState> {
+        // Checked here, not only on the sign-up screen. The username is a path component — every
+        // artifact this app owns is `keystore/<user>/…` or `pgp/<user>/…` built by concatenation — so
+        // "this name is safe to build paths from" is an invariant of *creating an account*, not a
+        // field-validation rule the presentation layer happens to apply. With it only in
+        // `SignUpViewModel`, any other caller of this use case bootstrapped an account named `./alice`
+        // or `con`, and a comment elsewhere claiming such an account could no longer be created was
+        // simply false.
+        //
+        // Only the username issues are enforced. Password strength is credential policy and stays the
+        // screen's business; this use case refuses what would make the storage layout unsafe, which is
+        // the part no caller may opt out of.
+        val username = (param as SignUpRequest.Standard).email.trim()
+        val usernameIssues = validateSignUpCredentials(username, param.password.trim()).issues
+            .filter { it in USERNAME_ISSUES }
+        if (usernameIssues.isNotEmpty()) {
+            return Outcome.Error("unusable username: ${usernameIssues.first()}", AuthFailure.SignupFailure)
+        }
         return when (
             val outcome = when (param) {
                 is SignUpRequest.Standard -> repository.signup(
-                    username = param.email.trim(),
+                    username = username,
                     password = param.password.trim(),
                 )
             }
@@ -79,5 +98,18 @@ class SignUpUser(
     private companion object {
         /** A stalled volume must not hold the signup result hostage. */
         val DEVELOPER_KEY_IMPORT_TIMEOUT = 5.seconds
+
+        /**
+         * The issues that describe the *name*, as opposed to the password.
+         *
+         * Listed rather than inferred so that adding a password rule to the validator cannot silently
+         * start failing account creation from callers that never asked this use case to police
+         * credential strength.
+         */
+        val USERNAME_ISSUES = setOf(
+            ValidateSignUpCredentials.Issue.UsernameTooShort,
+            ValidateSignUpCredentials.Issue.UsernameTooLong,
+            ValidateSignUpCredentials.Issue.UsernameHasIllegalCharacters,
+        )
     }
 }
