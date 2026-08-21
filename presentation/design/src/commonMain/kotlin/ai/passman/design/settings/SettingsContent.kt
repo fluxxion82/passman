@@ -45,6 +45,7 @@ fun SettingsContent(
     transferIcon: Painter,
     manageDevicesIcon: Painter,
     syncActivityIcon: Painter,
+    replacedBySyncIcon: Painter,
     privacyIcon: Painter,
     clipboardIcon: Painter,
     biometricIcon: Painter,
@@ -71,6 +72,7 @@ fun SettingsContent(
     onTransferClick: () -> Unit,
     onManageDevicesClick: () -> Unit,
     onSyncActivityClick: () -> Unit,
+    onReplacedBySyncClick: () -> Unit,
     onPrivacyPolicyClick: () -> Unit,
     onClipboardExpiryToggled: (Boolean) -> Unit,
     onBiometricUnlockToggled: (Boolean) -> Unit,
@@ -129,6 +131,12 @@ fun SettingsContent(
             icon = syncActivityIcon,
             name = "Sync Activity",
             onClick = onSyncActivityClick,
+        )
+
+        SettingsText(
+            icon = replacedBySyncIcon,
+            name = "Replaced by Sync",
+            onClick = onReplacedBySyncClick,
         )
 
         SettingsText(

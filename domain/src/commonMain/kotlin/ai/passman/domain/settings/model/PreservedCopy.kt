@@ -19,6 +19,10 @@ package ai.passman.domain.settings.model
  * @property originalName the path within the artifact directory this was displaced from.
  * @property modifiedAt the artifact's own last-modified time, carried across by the move — when this
  *   *version* was written, not when it was displaced.
+ * @property restorable whether the path this came from was recorded in full. False for a path too
+ *   long to fit a filename: the bytes are intact and still exportable, but the destination is
+ *   unknown, and restoring to a guessed one would write a file nobody asked for while leaving the
+ *   artifact it was meant to replace untouched.
  */
 data class PreservedCopy(
     val artifact: String,
@@ -26,4 +30,5 @@ data class PreservedCopy(
     val originalName: String,
     val sizeBytes: Long,
     val modifiedAt: Long,
+    val restorable: Boolean = true,
 )

@@ -136,6 +136,39 @@ class LocalPgpRepositoryTest {
     }
 
     @Test
+    fun getKeys_neverListsAVersionSyncDisplaced() = runBlocking {
+        // Plan obligation 5, pinned from the listing's side. What it actually catches is a preserved
+        // copy landing DIRECTLY in the keys directory; a copy in a subdirectory of it would pass,
+        // because this listing is flat and cannot see into one. That is not a gap in the test — the
+        // sibling placement exists to keep the store out of `bundle()`, which does recurse, and that
+        // is pinned separately in the bundler's own tests.
+        //
+        // The planted copy is a real, parseable secret ring for a DIFFERENT key, and both halves of
+        // that matter: a corrupt file would be dropped by the parse filter, and a second copy of the
+        // same key would be merged away by the listing's dedup. Either would pass without proving
+        // anything. Both mistakes were made here before this comment was written.
+        // A DIFFERENT key, not another copy of this one. The listing dedups by key id, so planting
+        // the same ring would merge into the existing pair and this would pass no matter where the
+        // store lives — which is exactly what the first version of this test did.
+        val otherGenerator = PgpKeys.createPgpKeyRingGenerator(
+            userId = "Displaced User <displaced@example.com>",
+            algorithm = EDDSA,
+            length = 256,
+            expirationInSeconds = 0,
+            password = "test-password",
+        )
+        val store = DirectoryBundler.conflictStore(pgpUserDir).apply { mkdirs() }
+        val displaced = File(store, "${"0".repeat(32)}-key_secret_ring.asc")
+        PgpKeys.saveSecretKeyRingToFile(otherGenerator.generateSecretKeyRing(), displaced.absolutePath)
+        check(displaced.isFile && displaced.length() > 0) { "fixture must be a real ring on disk" }
+
+        val pairs = repository.getKeys()
+
+        assertEquals(1, pairs.size, "the displaced copy must not appear as a key")
+        assertEquals(secretRingFile.absolutePath, requireNotNull(pairs.single().secretKey).path)
+    }
+
+    @Test
     fun getKeys_skipsFilesThatDoNotParseAsKeyRings() = runBlocking {
         // Sorts before both ring files, so it is processed first.
         File(pgpUserDir, "aaa_corrupt.asc").writeText(

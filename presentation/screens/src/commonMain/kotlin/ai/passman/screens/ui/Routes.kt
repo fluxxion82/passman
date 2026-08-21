@@ -21,6 +21,7 @@ import kotlinx.serialization.Serializable
 @Serializable data object ReconcileConflict
 @Serializable data object TrustedDevicesRoute
 @Serializable data object SyncActivityRoute
+@Serializable data object PreservedCopiesRoute
 
 // ---- PGP graph ----
 @Serializable data object PgpGraph

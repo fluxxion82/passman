@@ -383,6 +383,14 @@ object DirectoryBundler {
     /** 128 bits: a collision here would put two different secret rings on one name. */
     private const val DIGEST_BYTES = 16
 
+    private const val HEX = "0123456789abcdef"
+
+    /** Separates the digest from a path recorded in full — the copy can be put back. */
+    private const val PATH_COMPLETE = '-'
+
+    /** Separates the digest from a path too long to record — the copy can only be exported. */
+    private const val PATH_TRUNCATED = '~'
+
     /**
      * Names the file a preserve renames the live artifact onto before it knows what to call it.
      *
@@ -419,8 +427,8 @@ object DirectoryBundler {
      * the window between this rename and the caller's replace, and that write is then overwritten
      * unpreserved. Closing it needs a lock shared with every writer, not just with unbundle.
      */
-    private fun preserveDisplaced(live: File, destDir: File, relative: String) {
-        if (!live.isFile) return
+    private fun preserveDisplaced(live: File, destDir: File, relative: String): File? {
+        if (!live.isFile) return null
 
         val store = conflictStore(destDir).apply { mkdirs() }
 
@@ -447,9 +455,10 @@ object DirectoryBundler {
             // never was on the live path: this file is one this call created and nothing else can
             // reach it.
             captured.delete()
-            return
+            return preserved
         }
         DurableFiles.replace(captured, preserved)
+        return preserved
     }
 
     /**
@@ -470,7 +479,14 @@ object DirectoryBundler {
         // prefix still separate unless their bytes match — and matching bytes are the one case where
         // sharing a name is correct.
         val budget = MAX_CONFLICT_NAME_BYTES - digest.length - 1
-        return "$digest-${encodeRelative(relative).takeUtf8Bytes(budget)}"
+        val encoded = encodeRelative(relative)
+        val fitted = encoded.takeUtf8Bytes(budget)
+        // The separator records whether the path survived whole. A truncated path is NOT a path:
+        // decoding it and treating it as a destination would "restore" a copy to a filename that
+        // never existed, leaving the real artifact untouched while the copy left the store. Marking
+        // it lets restore refuse rather than do something plausible and wrong.
+        val separator = if (fitted == encoded) PATH_COMPLETE else PATH_TRUNCATED
+        return "$digest$separator$fitted"
     }
 
     /**
@@ -497,6 +513,9 @@ object DirectoryBundler {
     fun restorePreserved(preserved: File, destDir: File): Boolean = withDestinationLock(destDir) {
         if (!preserved.isFile) return@withDestinationLock false
 
+        // A truncated path names no real destination, so there is nothing honest to restore to.
+        if (!hasRecoverablePath(preserved)) return@withDestinationLock false
+
         val relative = originalPathOf(preserved)
         val target = File(destDir, relative)
         // Same confinement unbundle applies to a peer-authored entry name. The path here comes off a
@@ -506,9 +525,29 @@ object DirectoryBundler {
         }
 
         target.parentFile?.mkdirs()
-        preserveDisplaced(target, destDir, relative)
-        DurableFiles.replace(preserved, target)
+        val displaced = preserveDisplaced(target, destDir, relative)
+        try {
+            DurableFiles.replace(preserved, target)
+        } catch (failure: Throwable) {
+            // Put the displaced version back. A restore that fails halfway must not leave the
+            // artifact directory with no file at that path at all: the app would then have no ring
+            // or keystore there, which is a worse state than the one the user was trying to leave.
+            // The store gives up nothing real by handing it back — those bytes become live again.
+            displaced?.let { runCatching { DurableFiles.replace(it, target) } }
+            throw failure
+        }
         true
+    }
+
+    /**
+     * Permanently deletes a preserved copy, under the same lock everything else on [destDir] takes.
+     *
+     * The lock is the point, which is why this exists rather than the caller deleting the file. An
+     * unlocked delete races a restore of the same copy: the restore captures the live file, the
+     * delete removes the copy, and the install then fails with the live path already vacated.
+     */
+    fun deletePreserved(preserved: File, destDir: File): Boolean = withDestinationLock(destDir) {
+        preserved.delete()
     }
 
     /**
@@ -525,9 +564,23 @@ object DirectoryBundler {
      */
     fun originalPathOf(preserved: File): String {
         val name = preserved.name
-        val separator = name.indexOf('-')
-        if (separator != DIGEST_BYTES * 2) return name
-        return decodeRelative(name.substring(separator + 1))
+        val at = DIGEST_BYTES * 2
+        if (name.length <= at || (name[at] != PATH_COMPLETE && name[at] != PATH_TRUNCATED)) return name
+        if (!name.take(at).all { it in HEX }) return name
+        return decodeRelative(name.substring(at + 1))
+    }
+
+    /**
+     * Whether [preserved] records the full path it came from, and can therefore be put back.
+     *
+     * False when the path did not fit the filename budget. The bytes are fine and still exportable —
+     * it is only the destination that is unknown, and guessing one is how a restore writes a file
+     * nobody asked for while the artifact it was meant to replace sits there unchanged.
+     */
+    fun hasRecoverablePath(preserved: File): Boolean {
+        val name = preserved.name
+        val at = DIGEST_BYTES * 2
+        return name.length > at && name[at] == PATH_COMPLETE && name.take(at).all { it in HEX }
     }
 
     /**

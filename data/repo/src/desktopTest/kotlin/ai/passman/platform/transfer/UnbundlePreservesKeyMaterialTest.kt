@@ -379,6 +379,74 @@ class UnbundlePreservesKeyMaterialTest {
         assertFalse(File(root, "escaped.asc").exists(), "restore must not write outside the artifact directory")
     }
 
+    @Test
+    fun `a copy whose path did not fit is not restored to a guessed one`() {
+        // The name budget truncates a path that will not fit a filename. Decoding that truncation
+        // and treating it as a destination is the trap: it looks like a successful restore, but the
+        // copy lands at a filename that never existed while the artifact it was meant to replace
+        // sits there unchanged. Refusing is the honest answer; the bytes stay exportable.
+        val deep = (1..8).joinToString("/") { "component-$it-" + "x".repeat(28) } + "/secret_ring.asc"
+        DirectoryBundler.unbundle(zipOf(deep to LOCAL), destDir)
+        DirectoryBundler.unbundle(zipOf(deep to INBOUND), destDir)
+        val copy = DirectoryBundler.preservedCopies(destDir).single()
+
+        assertFalse(DirectoryBundler.hasRecoverablePath(copy), "this path cannot fit a filename")
+        assertFalse(DirectoryBundler.restorePreserved(copy, destDir))
+
+        assertContentEquals(INBOUND, File(destDir, deep).readBytes(), "the live artifact is untouched")
+        assertEquals(1, preservedBytes().size, "and the copy stays put, still exportable")
+    }
+
+    @Test
+    fun `a path that fits is still restorable`() {
+        // Guard against the refusal above being over-eager: ordinary names must keep working.
+        File(destDir, "work_secret_ring.asc").writeBytes(LOCAL)
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to INBOUND), destDir)
+
+        assertTrue(DirectoryBundler.hasRecoverablePath(DirectoryBundler.preservedCopies(destDir).single()))
+    }
+
+    @Test
+    fun `a store file whose name does not parse is never restored into the artifact directory`() {
+        // originalPathOf falls back to the whole filename so hand-placed files still list. Restore
+        // must not consume that fallback as a destination: the file would land in the artifact
+        // directory under a store-ish name, which no listing reads and which the NEXT OUTBOUND
+        // BUNDLE would ship to every peer — walking preserved key material straight back into the
+        // syncable tree the sibling store exists to keep it out of.
+        File(destDir, "work_secret_ring.asc").writeBytes(LOCAL)
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to INBOUND), destDir)
+        val handPlaced = File(DirectoryBundler.conflictStore(destDir), "rescued-by-hand.asc")
+        handPlaced.writeBytes(ByteArray(8) { 5 })
+
+        assertFalse(DirectoryBundler.restorePreserved(handPlaced, destDir))
+
+        assertTrue(handPlaced.isFile, "and it stays put, still exportable")
+        assertEquals(
+            setOf("work_secret_ring.asc"),
+            entryNames(DirectoryBundler.bundle(destDir)),
+            "nothing from the store may reach an outbound bundle",
+        )
+    }
+
+    @Test
+    fun `a failed restore leaves a file at the artifact path`() {
+        // Restore vacates the live path before installing. If the install then fails, the artifact
+        // directory must not be left with nothing at that path — no ring at all is a worse place to
+        // land than the version the user was trying to replace.
+        File(destDir, "work_secret_ring.asc").writeBytes(LOCAL)
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to INBOUND), destDir)
+        val copy = DirectoryBundler.preservedCopies(destDir).single()
+        // A non-empty directory at the target: the install's rename cannot complete onto it.
+        File(destDir, "work_secret_ring.asc").delete()
+        File(destDir, "work_secret_ring.asc").mkdirs()
+        File(destDir, "work_secret_ring.asc/occupied").writeBytes(ByteArray(4))
+
+        runCatching { DirectoryBundler.restorePreserved(copy, destDir) }
+
+        assertTrue(File(destDir, "work_secret_ring.asc").exists(), "the artifact path must not be vacated")
+        assertTrue(copy.isFile, "and the copy must still be recoverable")
+    }
+
     // ---- helpers ---------------------------------------------------------------------------
 
     /** Every preserved copy for [destDir], whatever the conflict store chooses to name them. */

@@ -36,6 +36,7 @@ internal class LocalPreservedCopyRepository(
                     originalName = DirectoryBundler.originalPathOf(file),
                     sizeBytes = file.length(),
                     modifiedAt = file.lastModified(),
+                    restorable = DirectoryBundler.hasRecoverablePath(file),
                 )
             }
         }.sortedByDescending { it.modifiedAt }
@@ -56,7 +57,10 @@ internal class LocalPreservedCopyRepository(
         val user = loggedInUser() ?: return@withContext false
         val directory = artifactDirectory(copy.artifact, user) ?: return@withContext false
         val file = resolveInStore(copy, directory) ?: return@withContext false
-        file.delete()
+        // Through the bundler rather than file.delete(), so this takes the same per-destination
+        // lock a restore or an inbound sync does. Deleting a copy out from under a restore leaves
+        // the artifact path vacated with nothing to install.
+        DirectoryBundler.deletePreserved(file, directory)
     }
 
     override suspend fun pathOf(copy: PreservedCopy): String? = withContext(coroutinesContextFacade.io) {

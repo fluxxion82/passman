@@ -2,9 +2,14 @@
 <!--
   The roots a content:// URI may be minted for. Deliberately NOT the whole of filesDir.
 
-  Everything this app shares is a keystore or a PGP key: the three producers are the keystore
+  Everything this app shares is a keystore or a PGP key: the four producers are the keystore
   share (KeystoreDetailsViewModel), the public-key share and the guarded private-key export
-  (PgpKeyDetailsViewModel). Nothing else calls shareFile.
+  (PgpKeyDetailsViewModel), and the export of a version an inbound sync displaced
+  (PreservedCopiesViewModel). Nothing else calls shareFile.
+
+  That fourth one needs no new root and must not be given one: sync keeps displaced versions in a
+  conflict store beside the artifact directory it belongs to — pgp/<user>.conflicts/ and
+  keystore/<user>.conflicts/ — which is already inside the two roots named below.
 
   A wider root than that is not merely untidy. AndroidSettingsService treats
   FileProvider.getUriForFile as a security boundary — it catches the throw and logs "path is

@@ -153,6 +153,25 @@ class LocalPreservedCopyRepositoryTest {
     }
 
     @Test
+    fun `refuses a symlink planted in the store`() = runBlocking {
+        // The string checks on the id cannot see this one: the name is perfectly ordinary and the
+        // file resolves inside the store by path. Only comparing the CANONICAL parent catches it,
+        // and until this test the canonical check could be deleted with the suite still green.
+        displaceRing()
+        val real = repository.list().single()
+        val live = File(pgpDir, "work_secret_ring.asc")
+        val link = File(DirectoryBundler.conflictStore(pgpDir), "innocent.asc")
+        java.nio.file.Files.createSymbolicLink(link.toPath(), live.toPath())
+
+        val copy = real.copy(id = "innocent.asc")
+        assertFalse(repository.delete(copy), "a symlink out of the store is not a preserved copy")
+        assertNull(repository.pathOf(copy))
+
+        assertTrue(live.isFile, "the live secret ring must still exist")
+        assertContentEquals(INBOUND, live.readBytes())
+    }
+
+    @Test
     fun `an unrecognised artifact resolves to nothing`() = runBlocking {
         displaceRing()
         val forged = repository.list().single().copy(artifact = "artifact-from-a-newer-build")

@@ -21,6 +21,7 @@ import ai.passman.viewmodel.settings.SettingsViewModel
 import ai.passman.viewmodel.settings.TransferViewModel
 import ai.passman.viewmodel.signup.SignUpViewModel
 import ai.passman.viewmodel.splash.SplashViewModel
+import ai.passman.viewmodel.sync.PreservedCopiesViewModel
 import ai.passman.viewmodel.sync.SyncActivityViewModel
 import org.koin.core.module.dsl.viewModel
 import org.koin.dsl.module
@@ -252,4 +253,13 @@ val viewModelModule = module {
     }
     viewModel { ReconcileViewModel(executeReconcileAction = get()) }
     viewModel { SyncActivityViewModel(getSyncLog = get(), clearSyncLog = get()) }
+    viewModel {
+        PreservedCopiesViewModel(
+            getPreservedCopies = get(),
+            restorePreservedCopy = get(),
+            deletePreservedCopy = get(),
+            getPreservedCopyPath = get(),
+            shareFile = get(),
+        )
+    }
 }

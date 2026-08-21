@@ -44,6 +44,16 @@ fun ConfirmShareDialog(
                 "its passphrase. Only export it to a destination you trust."
             confirmLabel = "Export"
         }
+        ShareFileKind.DisplacedVersion -> {
+            // Deliberately claims less than the others. Nothing in the conflict store distinguishes
+            // a secret ring from a public one or from a whole keystore, so promising that this file
+            // is passphrase-protected could be false in the one direction that harms the user.
+            title = "Export this version?"
+            message = "\"$fileName\" is a version an incoming sync replaced. It may be a private " +
+                "key ring or an entire keystore — Passman cannot tell which, so treat it as " +
+                "private key material and only export it to a destination you trust."
+            confirmLabel = "Export"
+        }
     }
     AlertDialog(
         onDismissRequest = onDismiss,

@@ -1,6 +1,7 @@
 package ai.passman.screens.ui.settings
 
 import ai.passman.design.settings.SettingsContent
+import ai.passman.screens.ui.PreservedCopiesRoute
 import ai.passman.screens.ui.SyncActivityRoute
 import ai.passman.screens.ui.TransferPasswords
 import ai.passman.screens.ui.TrustedDevicesRoute
@@ -18,6 +19,7 @@ import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.ImportExport
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
@@ -89,6 +91,7 @@ fun SettingsScreen(
         transferIcon = rememberVectorPainter(image = Icons.Filled.ImportExport),
         manageDevicesIcon = rememberVectorPainter(image = Icons.Filled.Devices),
         syncActivityIcon = rememberVectorPainter(image = Icons.Filled.History),
+        replacedBySyncIcon = rememberVectorPainter(image = Icons.Filled.Restore),
         privacyIcon = rememberVectorPainter(image = Icons.Filled.Security),
         clipboardIcon = rememberVectorPainter(image = Icons.Filled.ContentPaste),
         biometricIcon = rememberVectorPainter(image = Icons.Filled.Fingerprint),
@@ -97,6 +100,7 @@ fun SettingsScreen(
         onTransferClick = presenter::onTransferClick,
         onManageDevicesClick = { navController.navigate(TrustedDevicesRoute) },
         onSyncActivityClick = { navController.navigate(SyncActivityRoute) },
+        onReplacedBySyncClick = { navController.navigate(PreservedCopiesRoute) },
         onPrivacyPolicyClick = { uriHandler.openUri(PRIVACY_POLICY_URL) },
         onClipboardExpiryToggled = presenter::onClipboardExpiryToggled,
         onBiometricUnlockToggled = presenter::onBiometricUnlockToggled,
@@ -142,6 +146,7 @@ fun PreviewSettings() {
         transferIcon = rememberVectorPainter(image = Icons.Filled.ImportExport),
         manageDevicesIcon = rememberVectorPainter(image = Icons.Filled.Devices),
         syncActivityIcon = rememberVectorPainter(image = Icons.Filled.History),
+        replacedBySyncIcon = rememberVectorPainter(image = Icons.Filled.Restore),
         privacyIcon = rememberVectorPainter(image = Icons.Filled.Security),
         clipboardIcon = rememberVectorPainter(image = Icons.Filled.ContentPaste),
         biometricIcon = rememberVectorPainter(image = Icons.Filled.Fingerprint),
@@ -150,6 +155,7 @@ fun PreviewSettings() {
         onTransferClick = {},
         onManageDevicesClick = {},
         onSyncActivityClick = {},
+        onReplacedBySyncClick = {},
         onPrivacyPolicyClick = {},
         onClipboardExpiryToggled = {},
         onBiometricUnlockToggled = {},
