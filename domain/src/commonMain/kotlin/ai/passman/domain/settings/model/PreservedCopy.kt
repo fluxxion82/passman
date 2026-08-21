@@ -19,6 +19,10 @@ package ai.passman.domain.settings.model
  * @property originalName the path within the artifact directory this was displaced from.
  * @property modifiedAt the artifact's own last-modified time, carried across by the move — when this
  *   *version* was written, not when it was displaced.
+ * @property fingerprint primary key fingerprint, when this parses as an OpenPGP ring. Null for a
+ *   keystore, for anything unparseable, and for a ring this build cannot read — all three are states
+ *   real key material reaches, and none of them makes the bytes less worth keeping.
+ * @property algorithm primary key algorithm, on the same terms as [fingerprint].
  * @property restorable whether the path this came from was recorded in full. False for a path too
  *   long to fit a filename: the bytes are intact and still exportable, but the destination is
  *   unknown, and restoring to a guessed one would write a file nobody asked for while leaving the
@@ -31,4 +35,6 @@ data class PreservedCopy(
     val sizeBytes: Long,
     val modifiedAt: Long,
     val restorable: Boolean = true,
+    val fingerprint: String? = null,
+    val algorithm: String? = null,
 )

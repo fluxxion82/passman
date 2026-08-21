@@ -190,6 +190,24 @@ private fun PreservedCopyRow(
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface,
             )
+            // Shown when the file parses as an OpenPGP ring, absent otherwise — a keystore has no
+            // fingerprint, and a ring this build cannot read must still list. Two copies under one
+            // filename are the whole reason this screen exists, and the fingerprint is what tells
+            // them apart; the filename by definition cannot.
+            copy.fingerprint?.let { fingerprint ->
+                Text(
+                    text = "Fingerprint: $fingerprint",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            copy.algorithm?.let { algorithm ->
+                Text(
+                    text = "Algorithm: $algorithm",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Text(
                 text = formatFileSize(copy.sizeBytes),
                 fontSize = 12.sp,

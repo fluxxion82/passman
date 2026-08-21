@@ -9,6 +9,9 @@ import ai.passman.domain.user.models.Password
 import ai.passman.domain.user.repository.UserPreferences
 import ai.passman.platform.transfer.DirectoryBundler
 import ai.passman.repo.Platform
+import ai.passman.repo.datamapper.toAlgorithm
+import ai.passman.keys.model.EDDSA
+import ai.passman.pgp.utils.PgpKeys
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
@@ -153,6 +156,55 @@ class LocalPreservedCopyRepositoryTest {
     }
 
     @Test
+    fun `describes a displaced ring by fingerprint and algorithm`() = runBlocking {
+        // The filename cannot tell two copies apart — that is the entire problem this screen exists
+        // for — so the row has to carry something that can.
+        val generator = PgpKeys.createPgpKeyRingGenerator(
+            userId = "Displaced <displaced@example.com>",
+            algorithm = EDDSA,
+            length = 256,
+            expirationInSeconds = 0,
+            password = "test-password",
+        )
+        val ring = generator.generateSecretKeyRing()
+        File(pgpDir, "work_secret_ring.asc").writeBytes(ByteArray(64) { 1 })
+        PgpKeys.saveSecretKeyRingToFile(ring, File(pgpDir, "staged.asc").absolutePath)
+        val ringBytes = File(pgpDir, "staged.asc").readBytes()
+        File(pgpDir, "staged.asc").delete()
+        File(pgpDir, "work_secret_ring.asc").writeBytes(ringBytes)
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to ByteArray(64) { 2 }), pgpDir)
+
+        val copy = repository.list().single()
+
+        val expected = ring.publicKey.fingerprint.joinToString("") { byte -> "%02X".format(byte) }
+        assertEquals(expected, copy.fingerprint)
+        assertEquals(ring.publicKey.algorithm.toAlgorithm(), copy.algorithm)
+    }
+
+    @Test
+    fun `still lists a copy whose parse blows up`() = runBlocking {
+        // Broken ASCII armor, not random bytes: random bytes make BouncyCastle yield nothing
+        // quietly, so they would exercise the empty case rather than the throwing one. The
+        // dearmorer genuinely throws on this, which is what proves the parse is isolated.
+        //
+        // A file that will not parse is the case where the bytes matter most — a ring BouncyCastle
+        // mangles is exactly the sort of thing sync displaces — so describing it may fail, but
+        // listing it may not.
+        val armorGarbage =
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nnot base64 at all!!!\n-----END PGP PUBLIC KEY BLOCK-----\n"
+                .toByteArray()
+        File(pgpDir, "work_secret_ring.asc").writeBytes(armorGarbage)
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to ByteArray(64) { 3 }), pgpDir)
+
+        val copy = repository.list().single()
+
+        assertNull(copy.fingerprint, "nothing may be invented for bytes that do not parse")
+        assertNull(copy.algorithm)
+        assertEquals("work_secret_ring.asc", copy.originalName, "and the row still lists")
+        assertContentEquals(armorGarbage, File(repository.pathOf(copy)!!).readBytes(), "bytes untouched")
+    }
+
+    @Test
     fun `refuses a symlink planted in the store`() = runBlocking {
         // The string checks on the id cannot see this one: the name is perfectly ordinary and the
         // file resolves inside the store by path. Only comparing the CANONICAL parent catches it,
@@ -179,6 +231,14 @@ class LocalPreservedCopyRepositoryTest {
         assertFalse(repository.delete(forged))
         assertFalse(repository.restore(forged))
         assertNull(repository.pathOf(forged))
+    }
+
+    private fun zipOf(vararg entries: Pair<String, ByteArray>): ByteArray {
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            for ((name, bytes) in entries) { zip.putNextEntry(ZipEntry(name)); zip.write(bytes); zip.closeEntry() }
+        }
+        return out.toByteArray()
     }
 
     /** Puts a ring live, then syncs a different one over it — the state the screen exists to show. */

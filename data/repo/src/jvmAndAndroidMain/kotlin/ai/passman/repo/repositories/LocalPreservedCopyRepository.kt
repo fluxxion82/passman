@@ -9,6 +9,12 @@ import ai.passman.domain.user.repository.UserPreferences
 import ai.passman.logging.KLogger
 import ai.passman.platform.transfer.DirectoryBundler
 import ai.passman.repo.Platform
+import ai.passman.repo.datamapper.toAlgorithm
+import org.bouncycastle.openpgp.PGPObjectFactory
+import org.bouncycastle.openpgp.PGPPublicKeyRing
+import org.bouncycastle.openpgp.PGPSecretKeyRing
+import org.bouncycastle.openpgp.PGPUtil
+import org.bouncycastle.openpgp.operator.bc.BcKeyFingerprintCalculator
 import java.io.File
 import kotlinx.coroutines.withContext
 
@@ -30,6 +36,7 @@ internal class LocalPreservedCopyRepository(
         ARTIFACTS.flatMap { artifact ->
             val directory = artifactDirectory(artifact, user) ?: return@flatMap emptyList()
             DirectoryBundler.preservedCopies(directory).map { file ->
+                val summary = pgpSummary(file)
                 PreservedCopy(
                     artifact = artifact,
                     id = file.name,
@@ -37,6 +44,8 @@ internal class LocalPreservedCopyRepository(
                     sizeBytes = file.length(),
                     modifiedAt = file.lastModified(),
                     restorable = DirectoryBundler.hasRecoverablePath(file),
+                    fingerprint = summary?.fingerprint,
+                    algorithm = summary?.algorithm,
                 )
             }
         }.sortedByDescending { it.modifiedAt }
@@ -69,6 +78,46 @@ internal class LocalPreservedCopyRepository(
         resolveInStore(copy, directory)?.path
     }
 
+    /**
+     * Primary key fingerprint and algorithm, for telling two copies of one filename apart.
+     *
+     * **Display only, and it must stay that way.** Nothing here may gate listing, restoring,
+     * exporting or deleting: a copy that will not parse is precisely the case where the bytes matter
+     * most, and a screen that hid what it could not read would hide the worst conflicts. Every
+     * failure path returns null and the row still lists.
+     *
+     * Only the primary key is read. BouncyCastle drops a subkey carrying an algorithm it does not
+     * know *along with every subkey after it* while reporting the ring as whole (see
+     * `PgpKeys.readPublicKey`), so subkey-derived detail would be quietly wrong for a ring from a
+     * newer peer. The primary is the first key packet, so it is not subject to that.
+     *
+     * Nothing is re-encoded. The stored bytes are never rewritten by this — the whole preserve
+     * design rests on copies staying byte-for-byte what the peer sent.
+     */
+    private fun pgpSummary(file: File): PgpSummary? = runCatching {
+        if (file.length() > MAX_PARSED_BYTES) return null
+        PGPUtil.getDecoderStream(file.inputStream().buffered()).use { stream ->
+            val factory = PGPObjectFactory(stream, BcKeyFingerprintCalculator())
+            generateSequence { factory.nextObject() }
+                .mapNotNull { obj ->
+                    when (obj) {
+                        is PGPSecretKeyRing -> obj.publicKey
+                        is PGPPublicKeyRing -> obj.publicKey
+                        else -> null
+                    }
+                }
+                .firstOrNull()
+                ?.let { primary ->
+                    PgpSummary(
+                        fingerprint = primary.fingerprint.joinToString("") { byte -> "%02X".format(byte) },
+                        algorithm = primary.algorithm.toAlgorithm(),
+                    )
+                }
+        }
+    }.getOrNull()
+
+    private data class PgpSummary(val fingerprint: String, val algorithm: String)
+
     private suspend fun loggedInUser(): String? = (userPreferences.getUser() as? AppUser.LoggedIn)?.userName
 
     private fun artifactDirectory(artifact: String, user: String): File? = when (artifact) {
@@ -100,5 +149,8 @@ internal class LocalPreservedCopyRepository(
 
     private companion object {
         val ARTIFACTS = listOf(SyncOps.PGP, SyncOps.KEYSTORE)
+
+        /** Matches the cap `inspectKeyRingSupport` uses. Past this, do not read it to describe it. */
+        const val MAX_PARSED_BYTES = 8L * 1024 * 1024
     }
 }
