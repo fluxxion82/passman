@@ -326,6 +326,50 @@ class ArtifactDirectoryLockTest {
     }
 
     /**
+     * The **monitor** stage is a bounded wait, not `lock()`.
+     *
+     * Both stages need their own test and for a while only one had one. Contending in-registry —
+     * another thread holding through `withLock` — never reaches the file lock, because the monitor
+     * turns it away first; contending from outside the registry never exercises the monitor, because
+     * it is free. So the mutation that matters here is invisible to the other test: swap
+     * `monitor.tryLock(remaining, MILLISECONDS)` for the unbounded `monitor.lock()` and this test
+     * hangs until its own timeout while every other one stays green.
+     *
+     * That swap is the exact wedge the class KDoc forbids — an uninterruptible, unbounded wait means
+     * one stuck holder wedges every key edit and every sync on the account, permanently.
+     */
+    @Test
+    fun theMonitorStageIsABoundedWaitNotAnUnboundedOne() {
+        val holderHasIt = CountDownLatch(1)
+        val holderMayRelease = CountDownLatch(1)
+        val holder = thread {
+            ArtifactDirectoryLock.withLock(artifactDir) {
+                holderHasIt.countDown()
+                holderMayRelease.await(2, TimeUnit.MINUTES)
+            }
+        }
+        assertTrue(holderHasIt.await(30, TimeUnit.SECONDS), "the holder must get the lock first")
+
+        val gaveUp = CountDownLatch(1)
+        thread {
+            runCatching { ArtifactDirectoryLock.withLock(artifactDir, SHORT_BUDGET_MS) { } }
+            gaveUp.countDown()
+        }
+
+        // The contender is queued behind a holder that will not let go for two minutes. It must give
+        // up on its own; an unbounded monitor wait would still be parked when this expires.
+        val endedOnItsOwn = gaveUp.await(SHORT_BUDGET_MS * 10, TimeUnit.MILLISECONDS)
+
+        holderMayRelease.countDown()
+        holder.join(TimeUnit.SECONDS.toMillis(60))
+
+        assertTrue(
+            endedOnItsOwn,
+            "a contender queued on the monitor must time out on its own budget, not wait for the holder",
+        )
+    }
+
+    /**
      * The **file-lock** stage honours the caller's budget, not a fixed attempt count.
      *
      * The retry loop counts attempts, and the count was tuned to the default budget, so the wait it

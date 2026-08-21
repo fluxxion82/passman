@@ -150,22 +150,24 @@ object DirectoryBundler {
      * wire bundle - syncing those would clobber the peer's RSA keypair and break decryption of its
      * existing data.
      */
-    fun bundle(sourceDir: File, excludeBaseNames: Set<String> = emptySet()): ByteArray =
-        // Reading is a critical section too, and for the same reason writing is. The PGP writers
-        // rewrite a live ring with a truncating FileOutputStream, so a bundle built while one is in
-        // flight reads a PREFIX of it and sends that. The peer's unbundle then installs the truncated
-        // ring as its live one - preserving whatever it displaced, which is no comfort, because the
-        // damage is the file that just arrived. The inbound half of this window is what the preserve
-        // and this lock close; leaving the outbound half open would have shipped the same tear the
-        // other way.
-        // Taking the lock creates the lock file, and its parent hierarchy with it. For a source that
-        // is not a directory there is nothing to serialise against and nothing to bundle, so doing
-        // that would leave a stray `<source>.lock` and fresh directories behind for what is really a
-        // caller error — and would turn "no such directory" into a busy-lock failure if some other
-        // holder happened to own that name. Straight through instead, which is what this did before
-        // the lock existed: an empty bundle.
-        if (!sourceDir.isDirectory) bundleLocked(sourceDir, excludeBaseNames)
-        else withDestinationLock(sourceDir) { bundleLocked(sourceDir, excludeBaseNames) }
+    fun bundle(sourceDir: File, excludeBaseNames: Set<String> = emptySet()): ByteArray {
+        // Rejected BEFORE the lock, and then locked unconditionally. Reading is a critical section
+        // for the same reason writing is: the PGP writers rewrite a live ring with a truncating
+        // FileOutputStream, so a bundle built while one is in flight reads a PREFIX and ships it, and
+        // the peer installs the truncated ring as live.
+        //
+        // The check is here rather than only inside [bundleLocked] because taking the lock creates
+        // the lock file and its parent hierarchy, and doing that for a path that is not a directory
+        // strews artifacts around for what is really a caller error.
+        //
+        // It must not, however, become "if it is not a directory, bundle it unlocked" — that reads
+        // as harmless and is not. A source absent at this line can be created and locked by a
+        // concurrent unbundle before [bundleLocked]'s own `require` runs, which would then pass and
+        // walk the tree with no lock held, reading exactly the half-installed files the lock exists
+        // to hide. Refusing outright leaves no such branch.
+        require(sourceDir.isDirectory) { "not a directory: $sourceDir" }
+        return withDestinationLock(sourceDir) { bundleLocked(sourceDir, excludeBaseNames) }
+    }
 
     private fun bundleLocked(sourceDir: File, excludeBaseNames: Set<String>): ByteArray {
         require(sourceDir.isDirectory) { "not a directory: $sourceDir" }

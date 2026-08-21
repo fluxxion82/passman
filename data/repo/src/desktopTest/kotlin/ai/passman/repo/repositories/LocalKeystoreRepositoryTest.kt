@@ -391,6 +391,11 @@ class LocalKeystoreRepositoryTest {
         // Skipped, not asserted, on a filesystem that keeps the two normal forms apart. On ext4 they
         // are genuinely different files, so there is nothing here to guard and nothing to test — and
         // a `check` would have failed the whole desktop suite on Linux CI, which is where this runs.
+        //
+        // The cost is that this test is inert on CI, so the guard it covers would have no automated
+        // coverage there at all. `createKeyStore_refusesASymlinkedSpellingOfTheIdentityStore` exists
+        // for that: it exercises the same canonical resolution through a symlink, which every
+        // filesystem this ships on resolves the same way.
         if (!File(accountDir, "$nfd.pfx").exists()) return@runBlocking
 
         val accented = LocalKeystoreRepository(
@@ -415,6 +420,79 @@ class LocalKeystoreRepositoryTest {
         assertIs<Outcome.Error>(outcome, "an NFD spelling of the account name resolves onto the identity store")
         assertContentEquals(identityBytes, identity.readBytes(), "which must therefore be untouched")
     }
+
+    /**
+     * A symlinked spelling of the identity store is refused — and this one runs everywhere.
+     *
+     * The guard's substance is that it asks the *filesystem* which file a name denotes instead of
+     * comparing strings. Unicode normal form is the case that motivated it, but that can only be
+     * tested where the filesystem folds, which excludes Linux CI. A symlink is the same property
+     * expressed in a way every filesystem agrees on: two names, one file, and `canonicalFile`
+     * resolves both onto it.
+     *
+     * So this is the test that keeps the guard covered on CI. If it ever starts passing for the
+     * wrong reason, the Unicode one will not be there to catch it.
+     */
+    @Test
+    fun createKeyStore_refusesASymlinkedSpellingOfTheIdentityStore() = runBlocking {
+        val identity = File(keystoreDir, "alice.pfx")
+        val identityBytes = ByteArray(64) { 0x7F }
+        identity.writeBytes(identityBytes)
+        java.nio.file.Files.createSymbolicLink(
+            File(keystoreDir, "shortcut.pfx").toPath(),
+            identity.toPath(),
+        )
+
+        val outcome = repository.createKeyStore(
+            ai.passman.domain.keystore.CreateKeyStore.CreateRequest(
+                keystoreName = "shortcut",
+                keystorePassword = "symlink-password",
+                keyAlgorithm = KeystoreKeyAlgorithm.RSA,
+                keyAlias = "main",
+                aliasPassword = "symlink-password",
+                keystoreType = KeyStoreType.PKCS12,
+            ),
+        )
+
+        assertIs<Outcome.Error>(outcome, "a name that resolves onto the identity store must be refused")
+        assertContentEquals(
+            identityBytes,
+            identity.readBytes(),
+            "and the identity store must be untouched, whichever name was used to reach it",
+        )
+    }
+
+    /**
+     * The guard refuses a nameless keystore without refusing an odd but legitimate one.
+     *
+     * `""`, whitespace and `"/"` all reduce to the hidden file `.pfx` — a keystore with no name,
+     * which `getAllKeystores` would list. `"..."` produces `....pfx`, which is odd and perfectly
+     * valid; an earlier version of this guard trimmed dots before testing for empty and refused it,
+     * which is a worse bug than the cosmetic one it was closing.
+     */
+    @Test
+    fun createKeyStore_refusesANamelessKeystoreButAllowsAnOddOne() = runBlocking<Unit> {
+        listOf("", "   ", "\u2003", "/").forEach { typed ->
+            assertIs<Outcome.Error>(
+                repository.createKeyStore(request(typed)),
+                "\"$typed\" names no keystore and must be refused",
+            )
+        }
+
+        assertIs<Outcome.Success<*>>(
+            repository.createKeyStore(request("...")),
+            "\"...\" is an odd name, not an invalid one",
+        )
+    }
+
+    private fun request(name: String) = ai.passman.domain.keystore.CreateKeyStore.CreateRequest(
+        keystoreName = name,
+        keystorePassword = "name-guard-password",
+        keyAlgorithm = KeystoreKeyAlgorithm.RSA,
+        keyAlias = "main",
+        aliasPassword = "name-guard-password",
+        keystoreType = KeyStoreType.PKCS12,
+    )
 
     /**
      * Import refuses a trailing-dot spelling too.

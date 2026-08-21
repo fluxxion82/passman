@@ -98,13 +98,21 @@ class LocalKeystoreRepository(
         if (target.parentFile != root) {
             return "a keystore name may not contain a path; use a plain name"
         }
-        // A name that survives only as the extension. `""`, `"/"` and `"."` all reduce to the hidden
-        // file `.pfx`, which is a direct child and is not the identity store, so both checks below
-        // would pass it — and `getAllKeystores` would then list a keystore whose name is nothing at
-        // all. No security consequence; it is simply not the name the user asked for, and the refusal
-        // this function already promises ("use a plain name") should cover it.
-        if (target.name.removeSuffix(".pfx").trim(' ', '.').isEmpty()) {
+        // A name that survives only as the extension. `""` and `"/"` both reduce to the hidden file
+        // `.pfx`, which is a direct child and is not the identity store, so both checks below would
+        // pass it — and `getAllKeystores` would list a keystore whose name is nothing at all.
+        //
+        // Matched exactly rather than by trimming. The first attempt stripped dots and spaces before
+        // testing for empty, which also refused `"..."` — a name that produces `....pfx`, an odd but
+        // perfectly valid file the user is entitled to create. A guard that refuses legitimate input
+        // is a worse bug than the cosmetic one it was closing.
+        if (target.name.equals(".pfx", ignoreCase = true)) {
             return "a keystore needs a name"
+        }
+        // Refused here rather than by the filesystem, which only complains after the RSA keygen has
+        // already run and then reports a generic create failure.
+        if (target.name.toByteArray().size > MAX_FILE_NAME_BYTES) {
+            return "that name is too long"
         }
         val identity = KeystoreClient.identityStoreName(userName)
         if (target == canonicalOf(File(directory, identity))) {
@@ -121,6 +129,9 @@ class LocalKeystoreRepository(
         return null
     }
 
+    /** Filesystems typically stop at 255 bytes; the margin covers the ones that do not. */
+    private val MAX_FILE_NAME_BYTES = 200
+
     /** Absolute is the fallback, never the raw path: a relative one resolves against the CWD. */
     private fun canonicalOf(file: File): File =
         runCatching { file.canonicalFile }.getOrElse { file.absoluteFile }
@@ -133,6 +144,11 @@ class LocalKeystoreRepository(
             val keystorePath = "$keystoreDir${user.userName}"
             // The returned name must carry the extension: getAllKeystores lists file names WITH
             // it, and callers compare the two.
+            // Blank covers Unicode whitespace too, which `.pfx`-matching alone would let through as a
+            // keystore whose name is an em space.
+            if (request.keystoreName.isBlank()) {
+                return@withContext Outcome.Error("a keystore needs a name", KeystoreFailure.CreateKeystore)
+            }
             val fileName =
                 if (request.keystoreName.endsWith(".pfx")) request.keystoreName else "${request.keystoreName}.pfx"
             // Resolved and refused before anything is generated or written - see

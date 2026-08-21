@@ -97,25 +97,20 @@ class JvmPortableVaultRecovery(
         )
 
     /**
-     * Locked at the **dispatch**, which is the only place the choice and the act are one thing.
+     * Deliberately **not** locked here, and that is a correction rather than an omission.
      *
-     * Two problems live here and both are the same shape. Deciding "there is no record, create one"
-     * outside the lock let two concurrent callers both take the create branch: the first completed
-     * the set and the second then failed its `exists()` check and threw, because a half-present set
-     * is indistinguishable from a half-destroyed one. Under the lock the loser simply finds the
-     * record and opens it.
+     * An earlier version wrapped this whole dispatch, which read well and was wrong: this is the hot
+     * path. `JvmPortableCmsVaultFormat.seal`/`open` call it on **every portable vault read and
+     * write**, so locking here put a cross-process `FileLock` acquisition on every password save —
+     * and, worse, made a save able to fail with `ArtifactDirectoryBusyException` while a sync held
+     * the directory. Neither the ordinary open nor the common case writes anything.
      *
-     * And [open] is not read-only. Its legacy path calls [restoreBackup], which *writes* the P12 —
-     * a read-modify-write with no lock at all until now, in a directory sync unbundles into.
-     *
-     * Everything below re-enters: [create] and [upgrade] hold this same lock, and so does every
-     * [writeAtomically]. That is deliberate belt and braces, not redundancy to tidy away — the
-     * writes must stay individually locked for the paths that do not come through here.
+     * The two things that wrap bought are kept, moved to the paths that actually write: [create]
+     * re-checks under its own lock so a concurrent first creation resolves instead of throwing, and
+     * [restoreBackup] — the one part of [open] that writes — takes the lock itself.
      */
     internal fun material(username: String, sessionKey: VaultSessionKey): RecoveryKeyMaterial =
-        ArtifactDirectoryLock.withLock(directory(username)) {
-            if (materialFile(username).isFile) open(username, sessionKey) else create(username, sessionKey)
-        }
+        if (materialFile(username).isFile) open(username, sessionKey) else create(username, sessionKey)
 
     internal fun open(username: String, sessionKey: VaultSessionKey): RecoveryKeyMaterial {
         // Fail closed, but name the cause: the record is sealed under this device's master key, so
@@ -179,6 +174,13 @@ class JvmPortableVaultRecovery(
      * peer retries. It happens once per account, ever.
      */
     private fun createLocked(username: String, sessionKey: VaultSessionKey): RecoveryKeyMaterial {
+        // Re-evaluated under the lock, because `material` decides outside it. Two concurrent first
+        // accesses both take the create branch; the winner completes the whole set, and without this
+        // the loser reached the check below, found the files present and threw — a hard failure on an
+        // ordinary login. The check itself stays exactly as strict: a half-present set really is
+        // indistinguishable from a half-destroyed one. What changed is that a *complete* set is now
+        // recognised as the other caller's success and simply opened.
+        if (materialFile(username).isFile) return open(username, sessionKey)
         check(!p12File(username).exists() && !certificateFile(username).exists()) {
             "portable recovery material is incomplete for $username"
         }
@@ -250,8 +252,24 @@ class JvmPortableVaultRecovery(
         }
     }
 
-    /** Restores the verified pre-upgrade P12 if a replacement was written before its record. */
-    private fun restoreBackup(username: String, password: String, expectedCertificate: X509Certificate): KeyStore {
+    /**
+     * Restores the verified pre-upgrade P12 if a replacement was written before its record.
+     *
+     * The only write reachable from [open], and a read-modify-write at that: the bytes published come
+     * from the backup read here, so a sync landing in between would be reverted by the publish.
+     * Locked at this level rather than by wrapping [open], which is the hot read path — see
+     * [material].
+     */
+    private fun restoreBackup(username: String, password: String, expectedCertificate: X509Certificate): KeyStore =
+        ArtifactDirectoryLock.withLock(directory(username)) {
+            restoreBackupLocked(username, password, expectedCertificate)
+        }
+
+    private fun restoreBackupLocked(
+        username: String,
+        password: String,
+        expectedCertificate: X509Certificate,
+    ): KeyStore {
         val backup = backupFile(username)
         val keyStore = keyStore(backup, password)
         val certificate = keyStore.getCertificate(ALIAS) as? X509Certificate
@@ -321,31 +339,26 @@ class JvmPortableVaultRecovery(
     }
 
     /**
-     * Publish [bytes] at [target], holding the artifact-directory lock.
+     * Publish [bytes] at [target], holding **[username]'s account directory** lock.
      *
      * `keystore/<user>/` is a directory sync unbundles into, so every write here has to be ordered
-     * against `unbundle`'s displace-then-install pair. Two of the four filenames this class writes are
-     * **user-derived** — `<user>.recovery.p12` and `<user>.recovery.crt` — and `syncExclusions` is a
-     * basename string comparison, so a username carrying path syntax or a decomposable character
-     * makes them displaceable exactly as `IdentityStoreDisplaceableTest` shows for `<user>.pfx`. The
-     * P12 is this device's recovery private key; a peer's copy landing over a freshly written one
-     * leaves it unopenable by the local record, and the breakage surfaces only when the user actually
-     * needs their recovery phrase.
-     *
-     * Taken here rather than per call site because every write in this class funnels through this
-     * method, which makes the wrap unmissable. The two constant-named files ride along; the lock is
-     * reentrant and costs them nothing, and a per-file exception would be another rule to maintain.
-     * The multi-file operations take it again at their own level so their writes land as one.
-     */
-    /**
-     * Publish [bytes] at [target], holding **[username]'s account directory** lock.
+     * against `unbundle`'s displace-then-install pair. Taken in this one method because every write
+     * in this class funnels through it, which makes the wrap unmissable; the multi-file operations
+     * take it again at their own level so their writes land as one, and it is reentrant.
      *
      * Keyed on `directory(username)`, never on `target.parentFile`, and the difference is not
      * theoretical: usernames are gated on trimmed length alone, so `team/a` is a legal account and
      * `p12File("team/a")` is `keystore/team/a/team/a.recovery.p12` — whose parent is
-     * `keystore/team/a/team`, while sync locks `keystore/team/a`. Two different locks over one file,
-     * which is no exclusion at all. The same "a name is really a path" shape as the keystore-name
-     * guard, arriving this time through the username.
+     * `keystore/team/a/team`, while sync locks `keystore/team/a`. Two different locks over one file
+     * is no exclusion at all, and the stray lock file would have been created *inside* the directory
+     * `bundle()` walks. The same "a name is really a path" shape as the keystore-name guard, arriving
+     * this time through the username.
+     *
+     * What this does NOT fix is the matching hole in the exclusion list: `syncExclusions` compares
+     * basenames, so for `team/a` it holds `team/a.recovery.p12` while the file's basename is
+     * `a.recovery.p12`, and the P12 stays syncable in both directions. That is the same
+     * compare-a-name-where-the-filesystem-resolves-a-path defect recorded against `syncExclusions`
+     * itself, and it needs the canonical-path rework rather than a change here.
      */
     private fun writeAtomically(username: String, target: File, bytes: ByteArray) =
         ArtifactDirectoryLock.withLock(directory(username)) {
