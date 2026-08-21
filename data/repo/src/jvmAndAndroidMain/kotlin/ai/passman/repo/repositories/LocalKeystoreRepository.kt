@@ -98,6 +98,14 @@ class LocalKeystoreRepository(
         if (target.parentFile != root) {
             return "a keystore name may not contain a path; use a plain name"
         }
+        // A name that survives only as the extension. `""`, `"/"` and `"."` all reduce to the hidden
+        // file `.pfx`, which is a direct child and is not the identity store, so both checks below
+        // would pass it — and `getAllKeystores` would then list a keystore whose name is nothing at
+        // all. No security consequence; it is simply not the name the user asked for, and the refusal
+        // this function already promises ("use a plain name") should cover it.
+        if (target.name.removeSuffix(".pfx").trim(' ', '.').isEmpty()) {
+            return "a keystore needs a name"
+        }
         val identity = KeystoreClient.identityStoreName(userName)
         if (target == canonicalOf(File(directory, identity))) {
             return "that name is reserved for your account's identity; choose another"

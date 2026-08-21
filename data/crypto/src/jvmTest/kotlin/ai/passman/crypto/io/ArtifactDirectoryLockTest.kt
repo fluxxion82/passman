@@ -290,33 +290,39 @@ class ArtifactDirectoryLockTest {
     }
 
     /**
-     * Exhausting the budget throws rather than hangs, and leaves the lock usable.
+     * Timing out **inside `acquire`** throws rather than hangs, and leaves the lock usable.
      *
-     * The release path is what the second half covers: a timeout that left the monitor held would
-     * make the next acquisition hang, so a plain successful acquire afterwards is the evidence.
+     * Contended on the file lock from outside the registry, deliberately. An earlier version put the
+     * contention on the monitor, where the wait ends before `acquire` is ever called — so it never
+     * executed the failure path it claimed to cover, and deleting the `release` from that path left
+     * it green.
+     *
+     * What it can and cannot show: it does now execute the catch block, so an exception or a held
+     * monitor there is caught by the reacquire below. Whether the *channel* was closed is not
+     * observable through this object — a leaked descriptor changes nothing a caller can see, and it
+     * is reclaimed by GC before a descriptor count can measure it. That one line is held by review,
+     * not by this test, and saying so is better than a test that cannot fail.
      */
     @Test
-    fun exhaustingTheBudgetThrowsAndLeavesTheLockUsable() {
-        val holderHasIt = CountDownLatch(1)
-        val holderMayRelease = CountDownLatch(1)
-        val holder = thread {
-            ArtifactDirectoryLock.withLock(artifactDir) {
-                holderHasIt.countDown()
-                holderMayRelease.await(2, TimeUnit.MINUTES)
+    fun timingOutInsideAcquireThrowsAndLeavesTheLockUsable() {
+        val lockFile = File(artifactDir.parentFile, "${artifactDir.name}.lock")
+        lockFile.createNewFile()
+
+        FileChannel.open(lockFile.toPath(), StandardOpenOption.WRITE).use { channel ->
+            val outsider = channel.tryLock()
+            assertTrue(outsider != null, "precondition: the file lock must be held from outside the registry")
+            try {
+                assertFailsWith<ArtifactDirectoryBusyException>("a contended acquire must end in Busy, not a hang") {
+                    ArtifactDirectoryLock.withLock(artifactDir, SHORT_BUDGET_MS) { }
+                }
+            } finally {
+                outsider?.release()
             }
         }
-        assertTrue(holderHasIt.await(30, TimeUnit.SECONDS), "the holder must get the lock first")
-
-        assertFailsWith<ArtifactDirectoryBusyException>("a contended wait must end in Busy, not a hang") {
-            ArtifactDirectoryLock.withLock(artifactDir, SHORT_BUDGET_MS) { }
-        }
-
-        holderMayRelease.countDown()
-        holder.join(TimeUnit.SECONDS.toMillis(60))
 
         var reacquired = false
         ArtifactDirectoryLock.withLock(artifactDir) { reacquired = true }
-        assertTrue(reacquired, "a timed-out attempt must not leave the lock unusable")
+        assertTrue(reacquired, "a timed-out acquire must not leave the lock unusable")
     }
 
     /**
@@ -349,6 +355,14 @@ class ArtifactDirectoryLockTest {
                 }
                 val waitedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
 
+                // Both bounds. The upper one catches a wait governed by the attempt count instead of
+                // the deadline. The lower one catches the opposite mutation — a `remainingMillis` that
+                // always returns zero makes every contended acquire fail instantly, which is still a
+                // Busy and still under any upper bound, so an upper bound alone would call that a pass.
+                assertTrue(
+                    waitedMs >= SHORT_BUDGET_MS / 2,
+                    "a contended acquire must actually wait for its budget; gave up after $waitedMs ms",
+                )
                 assertTrue(
                     waitedMs < SHORT_BUDGET_MS * 4,
                     "the file-lock wait must end at the caller's budget; waited $waitedMs ms against " +

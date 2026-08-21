@@ -544,7 +544,11 @@ class JvmKeyStoreClient : KeystoreClient {
         }
     }.getOrElse {
         KLogger.e(it) { "failed to change keystore password: ${it.localizedMessage}" }
-        Outcome.Error(it.localizedMessage, KeystoreFailure.ChangePasswordFailure)
+        // `Outcome.Error.message` is non-null, and `localizedMessage` is a platform type that really
+        // can be null here: an InterruptedException from the lock's interruptible monitor wait or
+        // retry sleep carries no message, so passing it straight through would throw an NPE out of
+        // the very handler added to stop this method throwing.
+        Outcome.Error(it.localizedMessage ?: "change failed", KeystoreFailure.ChangePasswordFailure)
     }
 
     private fun changeKeystorePasswordLocked(
@@ -640,7 +644,7 @@ class JvmKeyStoreClient : KeystoreClient {
             }
         }.getOrElse {
             KLogger.e(it) { "failed to change keystore password: ${it.localizedMessage}" }
-            Outcome.Error(it.localizedMessage, KeystoreFailure.ChangePasswordFailure)
+            Outcome.Error(it.localizedMessage ?: "change failed", KeystoreFailure.ChangePasswordFailure)
         }
     }
 

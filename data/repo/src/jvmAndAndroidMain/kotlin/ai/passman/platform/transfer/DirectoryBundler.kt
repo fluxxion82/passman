@@ -158,7 +158,14 @@ object DirectoryBundler {
         // damage is the file that just arrived. The inbound half of this window is what the preserve
         // and this lock close; leaving the outbound half open would have shipped the same tear the
         // other way.
-        withDestinationLock(sourceDir) { bundleLocked(sourceDir, excludeBaseNames) }
+        // Taking the lock creates the lock file, and its parent hierarchy with it. For a source that
+        // is not a directory there is nothing to serialise against and nothing to bundle, so doing
+        // that would leave a stray `<source>.lock` and fresh directories behind for what is really a
+        // caller error — and would turn "no such directory" into a busy-lock failure if some other
+        // holder happened to own that name. Straight through instead, which is what this did before
+        // the lock existed: an empty bundle.
+        if (!sourceDir.isDirectory) bundleLocked(sourceDir, excludeBaseNames)
+        else withDestinationLock(sourceDir) { bundleLocked(sourceDir, excludeBaseNames) }
 
     private fun bundleLocked(sourceDir: File, excludeBaseNames: Set<String>): ByteArray {
         require(sourceDir.isDirectory) { "not a directory: $sourceDir" }

@@ -15,6 +15,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -230,6 +231,30 @@ class ArtifactWriterExclusionTest {
             )
         }
         assertTrue(finished.await(30, TimeUnit.SECONDS), "and must proceed once it is released")
+    }
+
+    /**
+     * Bundling a source that is not a directory leaves nothing behind.
+     *
+     * Taking the lock creates the lock file and, with it, whatever parent directories are missing.
+     * For a source that does not exist there is nothing to serialise against and nothing to bundle,
+     * so doing that would strew a `<source>.lock` and fresh directories across the tree for what is
+     * really a caller error — and, if some other holder happened to own that name, would report "no
+     * such directory" as a busy lock instead.
+     */
+    @Test
+    fun bundlingAMissingSourceCreatesNothing() {
+        val absent = File(tempDir, "nowhere${File.separator}alice")
+
+        assertFailsWith<IllegalArgumentException>("bundling a non-directory is still a caller error") {
+            DirectoryBundler.bundle(absent)
+        }
+
+        assertFalse(File(tempDir, "nowhere").exists(), "and must not have created its parent on the way out")
+        assertFalse(
+            File(tempDir, "nowhere${File.separator}alice.lock").exists(),
+            "nor a lock file for a directory that does not exist",
+        )
     }
 
     /**

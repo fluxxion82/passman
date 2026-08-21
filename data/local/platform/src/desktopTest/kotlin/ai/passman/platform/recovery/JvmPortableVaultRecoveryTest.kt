@@ -79,6 +79,83 @@ class JvmPortableVaultRecoveryTest {
         }
     }
 
+    /**
+     * For a username carrying a separator, the writes lock the **account directory** — so no lock
+     * file lands inside the tree sync bundles.
+     *
+     * Usernames are gated on trimmed length alone, so `team/a` is a legal account. Every recovery
+     * path is then built by concatenation: `p12File("team/a")` is
+     * `keystore/team/a/team/a.recovery.p12`, whose own parent is `keystore/team/a/team` — while sync
+     * locks `keystore/team/a`. Keying a write on the target's parent therefore took a different lock
+     * from the one it had to agree with, which is no exclusion at all.
+     *
+     * Asserted through the consequence rather than the key, because the consequence is worse than the
+     * missing exclusion: that wrong lock file is created *inside* the account directory, and
+     * `DirectoryBundler.bundle` walks every descendant of it. The stray lock would have been packed
+     * into the next outbound bundle and shipped to every paired peer. A sibling, which is what the
+     * corrected key produces, is outside that walk by construction.
+     */
+    @Test
+    fun access_forAUsernameWithASeparator_keepsItsLockFileOutOfTheBundledTree() {
+        val session = PasswordVaultCipher().createSession("login-password").sessionKey
+        try {
+            val recovery = JvmPortableVaultRecovery(platform(root), JvmSecureRandomService())
+
+            recovery.access("team/a", session)
+
+            val accountDir = File(root, "keystore/team/a")
+            assertTrue(accountDir.isDirectory, "precondition: the account directory is the nested one")
+            val strays = accountDir.walkTopDown().filter { it.name.endsWith(".lock") }.toList()
+            assertTrue(
+                strays.isEmpty(),
+                "no lock file may sit inside the directory bundle() walks; found $strays",
+            )
+        } finally {
+            session.destroy()
+        }
+    }
+
+    /**
+     * Two callers racing the very first access both succeed, and agree.
+     *
+     * The choice between opening an existing record and creating one was made *outside* the lock, so
+     * both callers took the create branch: the first completed the set, the second then hit
+     * `check(!p12File.exists() && !certificateFile.exists())` and threw — because a half-present set
+     * is indistinguishable from a half-destroyed one, which is exactly the check that must stay. The
+     * fix was to lock the dispatch, not to weaken the check: the loser now waits, finds the record,
+     * and opens it.
+     *
+     * Reachable on an ordinary login, where more than one caller can want recovery material at once.
+     */
+    @Test
+    fun access_racingTheFirstCreationYieldsOneAgreedSetOfMaterial() {
+        val session = PasswordVaultCipher().createSession("login-password").sessionKey
+        try {
+            val recovery = JvmPortableVaultRecovery(platform(root), JvmSecureRandomService())
+            val go = java.util.concurrent.CountDownLatch(1)
+            val results = java.util.Collections.synchronizedList(mutableListOf<Result<String>>())
+
+            val racers = (1..2).map {
+                kotlin.concurrent.thread {
+                    go.await()
+                    results += runCatching { recovery.access("racer", session).recoveryPassword }
+                }
+            }
+            go.countDown()
+            racers.forEach { it.join(java.util.concurrent.TimeUnit.SECONDS.toMillis(120)) }
+
+            assertEquals(2, results.size, "both callers must return")
+            results.forEach { assertTrue(it.isSuccess, "neither caller may fail: ${it.exceptionOrNull()}") }
+            assertEquals(
+                results[0].getOrThrow(),
+                results[1].getOrThrow(),
+                "and both must see the same recovery material, not two different creations",
+            )
+        } finally {
+            session.destroy()
+        }
+    }
+
     /** True when some code in this JVM currently holds the OS lock on [lockFile]. */
     private fun lockIsHeld(lockFile: File): Boolean {
         if (!lockFile.isFile) return false

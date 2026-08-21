@@ -67,13 +67,13 @@ class JvmPortableVaultRecovery(
             verifyP12(replacement, phrase, current.certificate)
             val previous = p12File(username).readBytes()
             try {
-                writeAtomically(backupFile(username), previous)
+                writeAtomically(username, backupFile(username), previous)
             } finally {
                 previous.fill(0)
             }
 
             try {
-                writeAtomically(p12File(username), replacement)
+                writeAtomically(username, p12File(username), replacement)
                 writeRecord(username, phrase, PortableVaultRecoveryFormat.Bip39English24, current.certificate, sessionKey)
             } catch (failure: Throwable) {
                 restoreBackup(username, current.password, current.certificate)
@@ -96,8 +96,26 @@ class JvmPortableVaultRecovery(
             recoveryFormat = opened.format,
         )
 
+    /**
+     * Locked at the **dispatch**, which is the only place the choice and the act are one thing.
+     *
+     * Two problems live here and both are the same shape. Deciding "there is no record, create one"
+     * outside the lock let two concurrent callers both take the create branch: the first completed
+     * the set and the second then failed its `exists()` check and threw, because a half-present set
+     * is indistinguishable from a half-destroyed one. Under the lock the loser simply finds the
+     * record and opens it.
+     *
+     * And [open] is not read-only. Its legacy path calls [restoreBackup], which *writes* the P12 —
+     * a read-modify-write with no lock at all until now, in a directory sync unbundles into.
+     *
+     * Everything below re-enters: [create] and [upgrade] hold this same lock, and so does every
+     * [writeAtomically]. That is deliberate belt and braces, not redundancy to tidy away — the
+     * writes must stay individually locked for the paths that do not come through here.
+     */
     internal fun material(username: String, sessionKey: VaultSessionKey): RecoveryKeyMaterial =
-        if (materialFile(username).isFile) open(username, sessionKey) else create(username, sessionKey)
+        ArtifactDirectoryLock.withLock(directory(username)) {
+            if (materialFile(username).isFile) open(username, sessionKey) else create(username, sessionKey)
+        }
 
     internal fun open(username: String, sessionKey: VaultSessionKey): RecoveryKeyMaterial {
         // Fail closed, but name the cause: the record is sealed under this device's master key, so
@@ -146,10 +164,19 @@ class JvmPortableVaultRecovery(
         ArtifactDirectoryLock.withLock(directory(username)) { createLocked(username, sessionKey) }
 
     /**
-     * Held across the whole creation. The `exists()` check below refuses to run while either file is
-     * present — a partial set is indistinguishable from a half-destroyed one — so deciding that and
-     * then writing must be one critical section, or a sync arriving in between makes the check stale
-     * and the write lands on a file the check said was absent.
+     * Held across the whole creation — **including the RSA key generation**, which is deliberate and
+     * is the opposite of what `JvmKeyStoreClient.createKeyStore` does a module away.
+     *
+     * The difference is that this method *reads* the directory to decide. The `exists()` check below
+     * refuses to run while either file is present — a partial set is indistinguishable from a
+     * half-destroyed one — so the decision and the writes have to be one critical section, and the
+     * keygen sits between them. `createKeyStore` reads nothing, so it can build its store first and
+     * lock only for the write, which is why its comment says holding the lock across a keygen buys
+     * nothing; here it buys the atomicity of the check.
+     *
+     * The cost is real and bounded: an inbound sync arriving during a first recovery creation waits
+     * out a 3072-bit keygen and may exhaust its budget, in which case the push is rejected and the
+     * peer retries. It happens once per account, ever.
      */
     private fun createLocked(username: String, sessionKey: VaultSessionKey): RecoveryKeyMaterial {
         check(!p12File(username).exists() && !certificateFile(username).exists()) {
@@ -160,9 +187,9 @@ class JvmPortableVaultRecovery(
             val keyPair = KeyPairGenerator.getInstance("RSA").apply { initialize(RSA_BITS) }.generateKeyPair()
             val certificate = Pkcs12Certificates.selfSignedRsa(keyPair, "Passman portable recovery $username")
             val p12 = LowPbePkcs12Writer.encode(ALIAS, keyPair.private, listOf(certificate), password.toCharArray())
-            writeAtomically(p12File(username), p12)
+            writeAtomically(username, p12File(username), p12)
             p12.fill(0)
-            writeAtomically(certificateFile(username), pem(certificate).encodeToByteArray())
+            writeAtomically(username, certificateFile(username), pem(certificate).encodeToByteArray())
             val verified = keyStore(username, password)
             check(verified.getKey(ALIAS, password.toCharArray()) is PrivateKey) { "recovery P12 verification failed" }
             writeRecord(username, password, PortableVaultRecoveryFormat.Bip39English24, certificate, sessionKey)
@@ -214,7 +241,7 @@ class JvmPortableVaultRecovery(
                 record.fill(0)
             }
             try {
-                writeAtomically(materialFile(username), sealed)
+                writeAtomically(username, materialFile(username), sealed)
             } finally {
                 sealed.fill(0)
             }
@@ -232,7 +259,7 @@ class JvmPortableVaultRecovery(
         check(certificate.encoded.contentEquals(expectedCertificate.encoded)) { "portable recovery backup certificate mismatch" }
         val bytes = backup.readBytes()
         try {
-            writeAtomically(p12File(username), bytes)
+            writeAtomically(username, p12File(username), bytes)
         } finally {
             bytes.fill(0)
         }
@@ -250,7 +277,7 @@ class JvmPortableVaultRecovery(
         }
         val bytes = backup.readBytes()
         try {
-            writeAtomically(p12File(username), bytes)
+            writeAtomically(username, p12File(username), bytes)
         } finally {
             bytes.fill(0)
         }
@@ -310,11 +337,20 @@ class JvmPortableVaultRecovery(
      * reentrant and costs them nothing, and a per-file exception would be another rule to maintain.
      * The multi-file operations take it again at their own level so their writes land as one.
      */
-    private fun writeAtomically(target: File, bytes: ByteArray) = ArtifactDirectoryLock.withLock(
-        checkNotNull(target.parentFile),
-    ) {
-        writeAtomicallyLocked(target, bytes)
-    }
+    /**
+     * Publish [bytes] at [target], holding **[username]'s account directory** lock.
+     *
+     * Keyed on `directory(username)`, never on `target.parentFile`, and the difference is not
+     * theoretical: usernames are gated on trimmed length alone, so `team/a` is a legal account and
+     * `p12File("team/a")` is `keystore/team/a/team/a.recovery.p12` — whose parent is
+     * `keystore/team/a/team`, while sync locks `keystore/team/a`. Two different locks over one file,
+     * which is no exclusion at all. The same "a name is really a path" shape as the keystore-name
+     * guard, arriving this time through the username.
+     */
+    private fun writeAtomically(username: String, target: File, bytes: ByteArray) =
+        ArtifactDirectoryLock.withLock(directory(username)) {
+            writeAtomicallyLocked(target, bytes)
+        }
 
     private fun writeAtomicallyLocked(target: File, bytes: ByteArray) {
         val parent = checkNotNull(target.parentFile)
