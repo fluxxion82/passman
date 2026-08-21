@@ -474,6 +474,44 @@ object DirectoryBundler {
     }
 
     /**
+     * Puts [preserved] back at the path it was displaced from inside [destDir].
+     *
+     * Restoring is itself a displacement, so it goes through the same preserve: whatever is live at
+     * the target is renamed into the store before the restored bytes land. Undoing a sync must not
+     * be a way to destroy the version the sync installed.
+     *
+     * The restore *moves* the copy out of the store rather than duplicating it. The bytes are then
+     * live, which is the strongest place they can be — and it keeps the store meaning "versions that
+     * are not live anywhere", which is what makes the recovery list readable.
+     *
+     * The byte-identical case needs no special handling and deliberately does not get any: the
+     * preserve captures the live file, finds its content-addressed name already taken by [preserved]
+     * itself, and drops the capture as a duplicate. Special-casing it would mean reading the live
+     * file to decide and then acting on it, which is the ordering that loses concurrent writes.
+     *
+     * Takes the same per-destination lock as [unbundle], so a restore and an inbound push cannot
+     * interleave on one directory.
+     *
+     * @return false when [preserved] is gone or its recorded path does not resolve inside [destDir].
+     */
+    fun restorePreserved(preserved: File, destDir: File): Boolean = withDestinationLock(destDir) {
+        if (!preserved.isFile) return@withDestinationLock false
+
+        val relative = originalPathOf(preserved)
+        val target = File(destDir, relative)
+        // Same confinement unbundle applies to a peer-authored entry name. The path here comes off a
+        // filename on disk, which a user can edit, so it gets checked like anything else untrusted.
+        if (relative.contains("..") || !target.canonicalFile.toPath().startsWith(destDir.canonicalFile.toPath())) {
+            return@withDestinationLock false
+        }
+
+        target.parentFile?.mkdirs()
+        preserveDisplaced(target, destDir, relative)
+        DurableFiles.replace(preserved, target)
+        true
+    }
+
+    /**
      * The bundle-relative path a preserved copy was displaced from, for display and for restore.
      *
      * Recovering it has to be exact, because restoring a copy means putting it back where it came

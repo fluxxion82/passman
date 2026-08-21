@@ -314,6 +314,71 @@ class UnbundlePreservesKeyMaterialTest {
         )
     }
 
+    @Test
+    fun `restoring puts the copy back and preserves what it replaces`() {
+        File(destDir, "work_secret_ring.asc").writeBytes(LOCAL)
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to INBOUND), destDir)
+
+        val restored = DirectoryBundler.restorePreserved(DirectoryBundler.preservedCopies(destDir).single(), destDir)
+
+        assertTrue(restored)
+        assertContentEquals(LOCAL, File(destDir, "work_secret_ring.asc").readBytes(), "the copy must be live again")
+        assertContentEquals(
+            INBOUND,
+            preservedBytes().single(),
+            "undoing a sync must not destroy the version the sync installed",
+        )
+    }
+
+    @Test
+    fun `restoring a nested copy goes back to its own directory`() {
+        File(destDir, "sub").mkdirs()
+        File(destDir, "sub/work_secret_ring.asc").writeBytes(LOCAL)
+        DirectoryBundler.unbundle(zipOf("sub/work_secret_ring.asc" to INBOUND), destDir)
+
+        assertTrue(DirectoryBundler.restorePreserved(DirectoryBundler.preservedCopies(destDir).single(), destDir))
+
+        assertContentEquals(LOCAL, File(destDir, "sub/work_secret_ring.asc").readBytes())
+    }
+
+    @Test
+    fun `restoring leaves the store when the copy is already live`() {
+        // Restoring something byte-identical to the live file is a no-op for the artifact, but the
+        // copy has to stop being listed or the user restores forever. It must go by the same
+        // capture-and-dedupe path, not by reading the live file and deciding.
+        File(destDir, "work_secret_ring.asc").writeBytes(LOCAL)
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to INBOUND), destDir)
+        val copy = DirectoryBundler.preservedCopies(destDir).single()
+        DirectoryBundler.restorePreserved(copy, destDir)
+
+        // Live is LOCAL again and the store holds INBOUND. Restore LOCAL a second time.
+        val again = DirectoryBundler.restorePreserved(
+            DirectoryBundler.preservedCopies(destDir).first { it.readBytes().contentEquals(INBOUND) },
+            destDir,
+        )
+
+        assertTrue(again)
+        assertContentEquals(INBOUND, File(destDir, "work_secret_ring.asc").readBytes())
+        assertEquals(1, preservedBytes().size, "each restore swaps live and stored, never accumulates")
+    }
+
+    @Test
+    fun `a copy whose name escapes the artifact directory is not restored`() {
+        File(destDir, "work_secret_ring.asc").writeBytes(LOCAL)
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to INBOUND), destDir)
+        // The store is a plain directory and a user can rename things in it. A name that decodes to
+        // an escaping path must be refused, not written outside the artifact directory.
+        val hostile = File(DirectoryBundler.conflictStore(destDir), "${"a".repeat(32)}-..%2Fescaped.asc")
+        hostile.writeBytes(LOCAL)
+
+        assertFalse(DirectoryBundler.restorePreserved(hostile, destDir))
+        // Escaping one level lands inside this test's own root, which tearDown removes. Reaching
+        // further would write into the shared system temp directory and outlive the test — which is
+        // exactly what happened while mutation-checking this assertion, and it then poisoned every
+        // later run. A test for an escape must not be able to escape.
+        assertFalse(File(root, "escaped.asc").exists(), "restore must not write outside the artifact directory")
+    }
+
     // ---- helpers ---------------------------------------------------------------------------
 
     /** Every preserved copy for [destDir], whatever the conflict store chooses to name them. */

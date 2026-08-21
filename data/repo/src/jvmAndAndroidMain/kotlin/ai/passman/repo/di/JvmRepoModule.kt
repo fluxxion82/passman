@@ -9,6 +9,8 @@ import ai.passman.platform.transfer.JvmPgpTransferService
 import ai.passman.platform.transfer.KeystoreTransferService
 import ai.passman.platform.transfer.PgpTransferService
 import ai.passman.repo.repositories.LocalKeystoreRepository
+import ai.passman.domain.settings.repository.PreservedCopyRepository
+import ai.passman.repo.repositories.LocalPreservedCopyRepository
 import ai.passman.repo.repositories.LocalPgpRepository
 import ai.passman.repo.tls.SyncTlsProvider
 import ai.passman.domain.keystore.repository.KeystoreRepository
@@ -54,6 +56,14 @@ val jvmRepoModule = module {
             userPreferences = get(),
             pgpTransferService = get(),
             pgpPreferences = get(),
+        )
+    }
+
+    single<PreservedCopyRepository> {
+        LocalPreservedCopyRepository(
+            platform = get(),
+            userPreferences = get(),
+            coroutinesContextFacade = get(),
         )
     }
 
