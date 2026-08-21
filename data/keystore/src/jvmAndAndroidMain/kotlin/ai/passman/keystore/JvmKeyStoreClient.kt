@@ -1,5 +1,6 @@
 package ai.passman.keystore
 
+import ai.passman.crypto.io.ArtifactDirectoryLock
 import ai.passman.crypto.io.DurableFiles
 import ai.passman.crypto.vault.IdentityStorePassword
 import ai.passman.keystore.model.Keystore
@@ -63,6 +64,41 @@ class JvmKeyStoreClient : KeystoreClient {
         Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME)
         Security.insertProviderAt(BouncyCastleProvider(), 1)
     }
+
+    /**
+     * Run [block] holding [keystorePath]'s artifact-directory lock.
+     *
+     * `keystore/<user>/` is a directory sync unbundles into, and `unbundle` preserves the file it is
+     * about to replace by renaming it away and then renaming the inbound version in. Every write
+     * this class makes has to be ordered against those two steps, or a keystore published in between
+     * is overwritten having never been preserved.
+     *
+     * The read-modify-write methods take it around the **load as well as the store**. Reading the
+     * store, editing the in-memory copy and writing it back is only correct if nothing else replaces
+     * the file in between; a lock around the write alone would let a sync land in the middle and
+     * then be silently reverted by a `store()` built from the pre-sync bytes. That is why
+     * [addKeystoreKey] and [deleteKeyStoreKey] hold this across their key generation too — the cost
+     * is a keygen inside the lock, and the alternative is a lost write.
+     *
+     * ## Ordering
+     *
+     * **This lock is the outer one.** [commitIdentityStore] and [restoreIdentityKeyStoreFromBackup]
+     * take it and then take [IdentityStoreLock]; nothing here may acquire it while already holding
+     * [IdentityStoreLock].
+     *
+     * Both are needed on those two paths because the two locks are **not** disjoint. The sync
+     * exclusion list was believed to keep `<user>.pfx` out of every bundle, which would have meant
+     * `unbundle` could never touch it — but that list compares basename strings while the filesystem
+     * resolves paths, and `IdentityStoreDisplaceableTest` shows three ways they disagree on the
+     * identity store's own name. A user-added keystore named after the account lands on it too.
+     *
+     * The order is this-then-[IdentityStoreLock] because [IdentityStoreLock] is bounded, fails
+     * rather than waits, and holds a cross-process `FileLock`. Nested the other way, a writer would
+     * block for this lock's whole budget while holding that one — the wedge [IdentityStoreLock]
+     * documents as unacceptable.
+     */
+    private fun <T> inArtifactDirectory(keystorePath: String, block: () -> T): T =
+        ArtifactDirectoryLock.withLock(File(keystorePath), block)
 
     private fun pkcs12KeyStore(): KeyStore {
         val provider = Security.getProvider("SUN") ?: Security.getProvider("SunJSSE")
@@ -164,20 +200,26 @@ class JvmKeyStoreClient : KeystoreClient {
             }
 
             KLogger.d { "external file path: $keystorePath" }
-            val folder = File(keystorePath)
-            if (!folder.exists()) {
-                KLogger.d { "folder dne" }
-                folder.mkdirs()
-            }
+            // Only the disk half is locked. Everything above built the store in memory and read
+            // nothing from this directory, so holding the lock across the key generation would make
+            // an inbound sync wait on an RSA keygen for no gain. The read-modify-write methods
+            // cannot do this - see inArtifactDirectory.
+            inArtifactDirectory(keystorePath) {
+                val folder = File(keystorePath)
+                if (!folder.exists()) {
+                    KLogger.d { "folder dne" }
+                    folder.mkdirs()
+                }
 
-            val external = File(folder.path, keystoreName)
-            KLogger.d { "external file: $external" }
-            if (!external.exists()) {
-                KLogger.d { "file dne" }
-                external.createNewFile()
-            }
+                val external = File(folder.path, keystoreName)
+                KLogger.d { "external file: $external" }
+                if (!external.exists()) {
+                    KLogger.d { "file dne" }
+                    external.createNewFile()
+                }
 
-            keyStore.store(external.outputStream(), keystorePassword.toCharArray())
+                keyStore.store(external.outputStream(), keystorePassword.toCharArray())
+            }
 
             KLogger.d {
                 "new keystore $keystoreName at location: $keystorePath " +
@@ -387,7 +429,11 @@ class JvmKeyStoreClient : KeystoreClient {
         }
     }
 
-    override fun addKeystoreKey(keystore: Keystore, keyAlias: String, keyPassword: String, algorithm: KeystoreKeyAlgorithm): Result<Boolean> {
+    /** Load, edit and store under one lock — see [inArtifactDirectory] for why the load is inside it. */
+    override fun addKeystoreKey(keystore: Keystore, keyAlias: String, keyPassword: String, algorithm: KeystoreKeyAlgorithm): Result<Boolean> =
+        inArtifactDirectory(keystore.path) { addKeystoreKeyLocked(keystore, keyAlias, keyPassword, algorithm) }
+
+    private fun addKeystoreKeyLocked(keystore: Keystore, keyAlias: String, keyPassword: String, algorithm: KeystoreKeyAlgorithm): Result<Boolean> {
         return runCatching {
             loadKeyStoreFromPath(
                 keystorePath = keystore.path,
@@ -434,11 +480,16 @@ class JvmKeyStoreClient : KeystoreClient {
         }
     }
 
-    override fun deleteKeystore(keystore: Keystore): Boolean {
-        return File(keystore.path, keystore.name).delete()
-    }
+    override fun deleteKeystore(keystore: Keystore): Boolean =
+        inArtifactDirectory(keystore.path) { File(keystore.path, keystore.name).delete() }
 
+    /** Load, edit and store under one lock — see [inArtifactDirectory] for why the load is inside it. */
     override fun deleteKeyStoreKey(
+        keystore: Keystore,
+        keyAlias: String
+    ): Boolean = inArtifactDirectory(keystore.path) { deleteKeyStoreKeyLocked(keystore, keyAlias) }
+
+    private fun deleteKeyStoreKeyLocked(
         keystore: Keystore,
         keyAlias: String
     ): Boolean {
@@ -462,7 +513,18 @@ class JvmKeyStoreClient : KeystoreClient {
         } ?: false
     }
 
+    /** Load, re-key and publish under one lock — see [inArtifactDirectory] for why the load is inside it. */
     override fun changeKeystorePassword(
+        keystorePath: String,
+        keystoreName: String,
+        keystoreType: KeyStoreType,
+        oldPassword: String,
+        newPassword: String,
+    ): Outcome<Unit> = inArtifactDirectory(keystorePath) {
+        changeKeystorePasswordLocked(keystorePath, keystoreName, keystoreType, oldPassword, newPassword)
+    }
+
+    private fun changeKeystorePasswordLocked(
         keystorePath: String,
         keystoreName: String,
         keystoreType: KeyStoreType,
@@ -664,63 +726,68 @@ class JvmKeyStoreClient : KeystoreClient {
         if (isLiveStoreReadable(target)) return false
 
         return runCatching {
-            IdentityStoreLock.withLock(folder, keystoreName) {
-                // The re-check, and the reason this is inside the lock at all.
-                //
-                // Everything above was read before this call had any exclusion, so by now a commit may
-                // have run to completion: published a new store, verified it, and deleted the backup as
-                // debris. Publishing what was read earlier would put the *pre*-commit store back and
-                // destroy the only copy of the new one — and when the commit was the
-                // login-password→derived-password migration, that is a migration reporting success and
-                // then being silently reverted. A live store that parses is the commit's own success
-                // criterion, so seeing one here means the race was lost and there is nothing to do.
-                if (isLiveStoreReadable(target)) {
-                    KLogger.i {
-                        "identity store: $keystoreName became readable while this recovery waited for the " +
-                            "lock; a commit published it, so ${backup.name} is left untouched"
+            // Artifact lock outermost, identity-store lock inside it - see inArtifactDirectory.
+            // Taken after the two unlocked fast-path checks above, so an ordinary login that has
+            // nothing to recover still answers without creating a lock file in every account.
+            inArtifactDirectory(folder.path) {
+                IdentityStoreLock.withLock(folder, keystoreName) {
+                    // The re-check, and the reason this is inside the lock at all.
+                    //
+                    // Everything above was read before this call had any exclusion, so by now a commit may
+                    // have run to completion: published a new store, verified it, and deleted the backup as
+                    // debris. Publishing what was read earlier would put the *pre*-commit store back and
+                    // destroy the only copy of the new one — and when the commit was the
+                    // login-password→derived-password migration, that is a migration reporting success and
+                    // then being silently reverted. A live store that parses is the commit's own success
+                    // criterion, so seeing one here means the race was lost and there is nothing to do.
+                    if (isLiveStoreReadable(target)) {
+                        KLogger.i {
+                            "identity store: $keystoreName became readable while this recovery waited for the " +
+                                "lock; a commit published it, so ${backup.name} is left untouched"
+                        }
+                        return@withLock false
                     }
-                    return@withLock false
-                }
-                // The winner may equally have deleted the backup on its way out.
-                if (!backup.isFile) return@withLock false
+                    // The winner may equally have deleted the backup on its way out.
+                    if (!backup.isFile) return@withLock false
 
-                // The same question the commit asks of its replacement, against the same alias the
-                // caller is about to demand: does it open, is that entry a private key, and does the
-                // key actually come out? A backup that only satisfies the file MAC is not a recovery,
-                // and neither is one holding somebody else's alias — that used to pass here, be
-                // published, and have the backup deleted, after which the caller's probe for
-                // `expectedAlias` failed and the last artefact was gone.
-                val loaded = loadPkcs12(backup, password.toCharArray())
-                val aliases = loaded.aliases().toList()
-                verifyIdentityAlias(loaded, aliases, expectedAlias, password, "the backup")
+                    // The same question the commit asks of its replacement, against the same alias the
+                    // caller is about to demand: does it open, is that entry a private key, and does the
+                    // key actually come out? A backup that only satisfies the file MAC is not a recovery,
+                    // and neither is one holding somebody else's alias — that used to pass here, be
+                    // published, and have the backup deleted, after which the caller's probe for
+                    // `expectedAlias` failed and the last artefact was gone.
+                    val loaded = loadPkcs12(backup, password.toCharArray())
+                    val aliases = loaded.aliases().toList()
+                    verifyIdentityAlias(loaded, aliases, expectedAlias, password, "the backup")
 
-                // Published through a temp copy rather than by moving the backup itself: if this fails
-                // half way the backup is still there to try again with, which is the entire reason it
-                // exists. Only once the live store is durably in place does the backup stop being the
-                // last copy.
-                val tmp = File.createTempFile("$keystoreName.", KeystoreClient.IDENTITY_STORE_TEMP_SUFFIX, folder)
-                try {
-                    FileOutputStream(tmp).use { out ->
-                        backup.inputStream().use { it.copyTo(out) }
-                        out.flush()
-                        out.fd.sync()
+                    // Published through a temp copy rather than by moving the backup itself: if this fails
+                    // half way the backup is still there to try again with, which is the entire reason it
+                    // exists. Only once the live store is durably in place does the backup stop being the
+                    // last copy.
+                    val tmp = File.createTempFile("$keystoreName.", KeystoreClient.IDENTITY_STORE_TEMP_SUFFIX, folder)
+                    try {
+                        FileOutputStream(tmp).use { out ->
+                            backup.inputStream().use { it.copyTo(out) }
+                            out.flush()
+                            out.fd.sync()
+                        }
+                        DurableFiles.replace(tmp, target)
+                    } finally {
+                        tmp.delete()
                     }
-                    DurableFiles.replace(tmp, target)
-                } finally {
-                    tmp.delete()
-                }
 
-                // Only now is the backup debris — and only if the file that replaced it satisfies the
-                // contract as *published*, read back from its final path rather than assumed from the
-                // bytes that went in.
-                val published = loadPkcs12(target, password.toCharArray())
-                verifyIdentityAlias(published, published.aliases().toList(), expectedAlias, password, "the restored store")
-                backup.delete()
-                KLogger.w {
-                    "recovered $keystoreName from ${backup.name}: the previous commit could neither publish " +
-                        "its replacement nor put the original back (${aliases.size} entries restored)"
+                    // Only now is the backup debris — and only if the file that replaced it satisfies the
+                    // contract as *published*, read back from its final path rather than assumed from the
+                    // bytes that went in.
+                    val published = loadPkcs12(target, password.toCharArray())
+                    verifyIdentityAlias(published, published.aliases().toList(), expectedAlias, password, "the restored store")
+                    backup.delete()
+                    KLogger.w {
+                        "recovered $keystoreName from ${backup.name}: the previous commit could neither publish " +
+                            "its replacement nor put the original back (${aliases.size} entries restored)"
+                    }
+                    true
                 }
-                true
             }
         }.getOrElse {
             // Never delete a backup that did not verify. A stale one from an older password is still
@@ -822,8 +889,14 @@ class JvmKeyStoreClient : KeystoreClient {
         if (!folder.exists()) {
             folder.mkdirs()
         }
-        IdentityStoreLock.withLock(folder, target.name) {
-            publishIdentityStore(folder, target, encoded, password, expectedAliases)
+        // Artifact lock outermost, identity-store lock inside it. Both are needed: the exclusion
+        // list does not keep <user>.pfx out of an unbundle the way this file used to assume, and a
+        // user-added keystore named after the account resolves to it as well. The order is fixed —
+        // see inArtifactDirectory.
+        inArtifactDirectory(folder.path) {
+            IdentityStoreLock.withLock(folder, target.name) {
+                publishIdentityStore(folder, target, encoded, password, expectedAliases)
+            }
         }
     }
 

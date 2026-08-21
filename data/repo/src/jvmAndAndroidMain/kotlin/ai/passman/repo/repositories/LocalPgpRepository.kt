@@ -3,6 +3,7 @@ package ai.passman.repo.repositories
 import ai.passman.cache.di.passmanSessionScope
 import ai.passman.crypto.Crypto
 import ai.passman.crypto.CryptoKey
+import ai.passman.crypto.io.ArtifactDirectoryLock
 import ai.passman.crypto.io.DurableFiles
 import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.keys.model.DSA
@@ -61,6 +62,36 @@ internal class LocalPgpRepository(
     private val pgpPreferences: PgpPreferences,
 ) : PgpRepository {
     private val pgpDir = "${platform.getLocalPath()}${File.separator}pgp${File.separator}"
+
+    /**
+     * Run [block] holding `pgp/<userName>/`'s artifact-directory lock.
+     *
+     * This is the directory a PGP sync unbundles into, and `unbundle` displaces the file it is about
+     * to replace by renaming it away and then renaming the inbound version in. Without this, a key
+     * edit landing between those two steps was overwritten having never been preserved.
+     *
+     * It is taken **here** rather than inside [PgpClient] deliberately. `PgpClient` is handed file
+     * paths and knows nothing about artifact directories, so locking there would mean deriving the
+     * directory from a ring file's own parent — the same mistake `DirectoryBundler` documents for the
+     * conflict store, where a nested entry yields a child of the bundled tree instead of the tree
+     * itself. This class owns `pgpDir`, so it can name the directory the lock is actually keyed on.
+     *
+     * The consequence is that a future direct `PgpClient` write from somewhere else would miss the
+     * lock. Every mutating `PgpClient` method is called from this class and nowhere else today, and
+     * `PgpClientArtifactLockTest` pins that.
+     *
+     * Read-modify-write callers hold it across the **read** as well: rewriting a ring means parsing
+     * the live file and encoding a new one over it, which is only correct if nothing replaces the
+     * file in between.
+     */
+    private fun <T> inKeyDirectory(userName: String, block: () -> T): T =
+        ArtifactDirectoryLock.withLock(File("$pgpDir$userName"), block)
+
+    /**
+     * What the bundled-developer-key write decided, carried out of the lock so the suspending
+     * preference write can happen after it is released.
+     */
+    private enum class DeveloperKeyOutcome { OCCUPIED, ALREADY_PRESENT, WRITTEN }
 
     override suspend fun getKeys(): List<PgpKeyPair> = withContext(coroutinesContextFacade.io) {
         val user = userPreferences.getUser() as AppUser.LoggedIn
@@ -267,37 +298,45 @@ internal class LocalPgpRepository(
             val pgpSecretRingPath = "$pgpDir${user.userName}${File.separator}${name}_secret_ring.asc"
             val pgpPublicRingPath = "$pgpDir${user.userName}${File.separator}${name}_public_ring.asc"
 
-            val secretRingFile = File(pgpSecretRingPath)
-            val (pgpSecretRing, pgpPublicRing) = if (!secretRingFile.exists()) {
-                val algo = when (algorithm) {
-                    PgpKeyAlgorithm.DSA_SIGN -> DSA
-                    PgpKeyAlgorithm.RSA_SIGN -> RSA
-                    PgpKeyAlgorithm.ELGAMAL_ENCRYPT -> ELGAMAL
-                    PgpKeyAlgorithm.RSA_ENCRYPT -> RSA
-                    PgpKeyAlgorithm.ED25519 -> EDDSA
-                    PgpKeyAlgorithm.ECDSA_ECDH -> ECDSA
-                    PgpKeyAlgorithm.ED25519_X25519 -> ED25519
-                    PgpKeyAlgorithm.ED448_X448 -> ED448
+            // The whole decision-and-write, including key generation, is inside the lock: the
+            // `exists()` branch below chooses between generating and re-opening, and acting on that
+            // answer after a sync has replaced the file would write a ring built from bytes that are
+            // no longer there. A long generation can therefore make a concurrent inbound push
+            // exhaust the lock budget and be rejected; the peer retries, and losing a key would not
+            // be recoverable.
+            inKeyDirectory(user.userName) {
+                val secretRingFile = File(pgpSecretRingPath)
+                val (pgpSecretRing, pgpPublicRing) = if (!secretRingFile.exists()) {
+                    val algo = when (algorithm) {
+                        PgpKeyAlgorithm.DSA_SIGN -> DSA
+                        PgpKeyAlgorithm.RSA_SIGN -> RSA
+                        PgpKeyAlgorithm.ELGAMAL_ENCRYPT -> ELGAMAL
+                        PgpKeyAlgorithm.RSA_ENCRYPT -> RSA
+                        PgpKeyAlgorithm.ED25519 -> EDDSA
+                        PgpKeyAlgorithm.ECDSA_ECDH -> ECDSA
+                        PgpKeyAlgorithm.ED25519_X25519 -> ED25519
+                        PgpKeyAlgorithm.ED448_X448 -> ED448
+                    }
+                    val keyRingGenerator = PgpKeys.createPgpKeyRingGenerator(
+                        userId = UserId(name = name, email = email, isRevoked = false).toString(),
+                        algorithm = algo,
+                        length = length,
+                        expirationInSeconds = expiration,
+                        password = password,
+                    )
+                    keyRingGenerator.generateSecretKeyRing()
+                    val secretRing = keyRingGenerator.generateSecretKeyRing()
+                    val publicRing = keyRingGenerator.generatePublicKeyRing()
+                    secretRing to publicRing
+                } else {
+                    val secretRing = pgpClient.getSecretKeyRing(pgpSecretRingPath, password)
+                    val publicRing = pgpClient.getPublicKeyRing(pgpPublicRingPath)
+                    secretRing to publicRing
                 }
-                val keyRingGenerator = PgpKeys.createPgpKeyRingGenerator(
-                    userId = UserId(name = name, email = email, isRevoked = false).toString(),
-                    algorithm = algo,
-                    length = length,
-                    expirationInSeconds = expiration,
-                    password = password,
-                )
-                keyRingGenerator.generateSecretKeyRing()
-                val secretRing = keyRingGenerator.generateSecretKeyRing()
-                val publicRing = keyRingGenerator.generatePublicKeyRing()
-                secretRing to publicRing
-            } else {
-                val secretRing = pgpClient.getSecretKeyRing(pgpSecretRingPath, password)
-                val publicRing = pgpClient.getPublicKeyRing(pgpPublicRingPath)
-                secretRing to publicRing
-            }
 
-            PgpKeys.saveSecretKeyRingToFile(pgpSecretRing, pgpSecretRingPath)
-            PgpKeys.savePublicKeyRingToFile(pgpPublicRing, pgpPublicRingPath)
+                PgpKeys.saveSecretKeyRingToFile(pgpSecretRing, pgpSecretRingPath)
+                PgpKeys.savePublicKeyRingToFile(pgpPublicRing, pgpPublicRingPath)
+            }
 
             Outcome.Success("")
         }.onFailure {
@@ -514,7 +553,11 @@ internal class LocalPgpRepository(
         userIdAction: UserIdAction
     ): Outcome<Unit> = withContext(coroutinesContextFacade.io) {
         runCatching {
-            pgpClient.modifyUserId(keyPair = keyPair, userId.toString(), password, userIdAction)
+            val user = userPreferences.getUser() as AppUser.LoggedIn
+            // Parses the live rings and encodes new ones over them - read and write both inside.
+            inKeyDirectory(user.userName) {
+                pgpClient.modifyUserId(keyPair = keyPair, userId.toString(), password, userIdAction)
+            }
             Outcome.Success(Unit)
         }.onFailure {
             KLogger.e(it) {
@@ -574,14 +617,18 @@ internal class LocalPgpRepository(
                 PgpKeyAlgorithm.ED448_X448 -> error("Ed448/X448 subkeys are not supported")
             }
 
-            pgpClient.addSubKey(
-                keyPair = keyPair,
-                passphrase = password,
-                algorithm = algorithmDetails.algorithm,
-                length = length,
-                keyFlags = algorithmDetails.flags,
-                expirationTimeInSeconds = expiration,
-            )
+            val user = userPreferences.getUser() as AppUser.LoggedIn
+            // Parses the live rings and encodes new ones over them - read and write both inside.
+            inKeyDirectory(user.userName) {
+                pgpClient.addSubKey(
+                    keyPair = keyPair,
+                    passphrase = password,
+                    algorithm = algorithmDetails.algorithm,
+                    length = length,
+                    keyFlags = algorithmDetails.flags,
+                    expirationTimeInSeconds = expiration,
+                )
+            }
 
             Outcome.Success(Unit)
         }.onFailure {
@@ -601,9 +648,13 @@ internal class LocalPgpRepository(
     ): Outcome<Unit> =
         withContext(coroutinesContextFacade.io) {
             kotlin.runCatching {
-                when (action) {
-                    SubKeyAction.REMOVE -> pgpClient.removeSubkey(keyPair, password, subKeyId)
-                    SubKeyAction.REVOKE -> pgpClient.revokeSubkey(keyPair, password, subKeyId)
+                val user = userPreferences.getUser() as AppUser.LoggedIn
+                // Parses the live rings and encodes new ones over them - read and write both inside.
+                inKeyDirectory(user.userName) {
+                    when (action) {
+                        SubKeyAction.REMOVE -> pgpClient.removeSubkey(keyPair, password, subKeyId)
+                        SubKeyAction.REVOKE -> pgpClient.revokeSubkey(keyPair, password, subKeyId)
+                    }
                 }
 
                 Outcome.Success(Unit)
@@ -629,7 +680,12 @@ internal class LocalPgpRepository(
         newPassword: String
     ): Outcome<Unit> = withContext(coroutinesContextFacade.io) {
         runCatching {
-            pgpClient.changePassword(keyPair, oldPassword, newPassword)
+            val user = userPreferences.getUser() as AppUser.LoggedIn
+            // Parses the live secret ring under the old passphrase and encodes a new one over it -
+            // read and write both inside.
+            inKeyDirectory(user.userName) {
+                pgpClient.changePassword(keyPair, oldPassword, newPassword)
+            }
             Outcome.Success(Unit)
         }.onFailure {
             KLogger.e(it) { "failed to modify subkey, ${it.message}" }
@@ -662,10 +718,14 @@ internal class LocalPgpRepository(
                 is PgpKeyRingSupport.Supported -> Unit
             }
 
-            // The per-user dir otherwise only exists once key generation has run; importing
-            // into a fresh account must not depend on that.
-            destination.parent?.let { Files.createDirectories(it) }
-            Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING)
+            // Only the write is locked. Everything above inspected the SOURCE file, which is
+            // outside the artifact directory, so there is no read here to keep atomic with it.
+            inKeyDirectory(user.userName) {
+                // The per-user dir otherwise only exists once key generation has run; importing
+                // into a fresh account must not depend on that.
+                destination.parent?.let { Files.createDirectories(it) }
+                Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING)
+            }
 
             Outcome.Success(Unit)
         }.onFailure {
@@ -711,49 +771,64 @@ internal class LocalPgpRepository(
 
             val destination = File("$pgpDir${user.userName}${File.separator}${BundledDeveloperKey.FILE_NAME}")
 
-            // Occupant guard: sync copies whatever a peer had under this name, so the slot may
-            // already hold key material. The developer key's own content (a peer's earlier
-            // import) is treated as already-imported for auto and refreshable for force; ANY
-            // other content — a different key, or something that does not parse — is
-            // irreplaceable user data and neither mode may overwrite it.
-            if (destination.exists()) {
-                val occupantFingerprint = runCatching {
-                    soleImportablePublicRingFingerprint(destination.readBytes())
-                }.getOrElse {
-                    if (it is CancellationException) throw it
-                    null
-                }
-                if (occupantFingerprint != pinnedFingerprint) {
-                    KLogger.e { "refusing to overwrite ${destination.name}: it does not hold the developer key" }
-                    return@withContext Outcome.Error(
-                        "another key occupies the developer key file; refusing to overwrite it",
-                        PgpFailure.ImportKeyFailure,
-                    )
-                }
-                if (!force) {
+            // The occupant guard reads `destination` and then decides whether to write over it, so
+            // both halves are inside the lock: a sync landing between them would be overwritten on
+            // the strength of a check made against bytes it had already replaced. The decision comes
+            // back as a value rather than an early return because the lock takes a plain lambda, and
+            // the suspending preference write has to happen outside it — this is a blocking lock and
+            // must not be held across a suspension point.
+            val outcome = inKeyDirectory(user.userName) {
+                // Occupant guard: sync copies whatever a peer had under this name, so the slot may
+                // already hold key material. The developer key's own content (a peer's earlier
+                // import) is treated as already-imported for auto and refreshable for force; ANY
+                // other content — a different key, or something that does not parse — is
+                // irreplaceable user data and neither mode may overwrite it.
+                if (destination.exists()) {
+                    val occupantFingerprint = runCatching {
+                        soleImportablePublicRingFingerprint(destination.readBytes())
+                    }.getOrElse {
+                        if (it is CancellationException) throw it
+                        null
+                    }
+                    if (occupantFingerprint != pinnedFingerprint) {
+                        KLogger.e { "refusing to overwrite ${destination.name}: it does not hold the developer key" }
+                        return@inKeyDirectory DeveloperKeyOutcome.OCCUPIED
+                    }
                     // A paired device already installed it; record that and skip the write.
+                    if (!force) return@inKeyDirectory DeveloperKeyOutcome.ALREADY_PRESENT
+                }
+
+                // Fresh accounts have no per-user dir yet (importPgpFile parity).
+                destination.parentFile?.let { Files.createDirectories(it.toPath()) }
+                // Write-to-temp + atomic replace: getKeys/sync must never observe a half-written
+                // ring. `<name>.<random>` + TEMP_FILE_SUFFIX is the staging pattern KeyringStore /
+                // HybridKeyManager / MlDsaKeyManager use; the suffix keeps the staging file out of
+                // keyFiles listings and out of sync bundles.
+                val temp = File.createTempFile("${destination.name}.", DirectoryBundler.TEMP_FILE_SUFFIX, destination.parentFile)
+                try {
+                    temp.writeBytes(armorBytes)
+                    DurableFiles.replace(temp, destination)
+                } finally {
+                    temp.delete() // no-op after a successful move; cleanup after a failed write
+                }
+                DeveloperKeyOutcome.WRITTEN
+            }
+
+            when (outcome) {
+                DeveloperKeyOutcome.OCCUPIED -> return@withContext Outcome.Error(
+                    "another key occupies the developer key file; refusing to overwrite it",
+                    PgpFailure.ImportKeyFailure,
+                )
+                // Recorded only after verification AND the write both succeeded.
+                DeveloperKeyOutcome.ALREADY_PRESENT -> {
                     pgpPreferences.setDeveloperKeyImported(user.userName)
-                    return@withContext Outcome.Success(false)
+                    Outcome.Success(false)
+                }
+                DeveloperKeyOutcome.WRITTEN -> {
+                    pgpPreferences.setDeveloperKeyImported(user.userName)
+                    Outcome.Success(true)
                 }
             }
-
-            // Fresh accounts have no per-user dir yet (importPgpFile parity).
-            destination.parentFile?.let { Files.createDirectories(it.toPath()) }
-            // Write-to-temp + atomic replace: getKeys/sync must never observe a half-written
-            // ring. `<name>.<random>` + TEMP_FILE_SUFFIX is the staging pattern KeyringStore /
-            // HybridKeyManager / MlDsaKeyManager use; the suffix keeps the staging file out of
-            // keyFiles listings and out of sync bundles.
-            val temp = File.createTempFile("${destination.name}.", DirectoryBundler.TEMP_FILE_SUFFIX, destination.parentFile)
-            try {
-                temp.writeBytes(armorBytes)
-                DurableFiles.replace(temp, destination)
-            } finally {
-                temp.delete() // no-op after a successful move; cleanup after a failed write
-            }
-
-            // Recorded only after verification AND the write both succeeded.
-            pgpPreferences.setDeveloperKeyImported(user.userName)
-            Outcome.Success(true)
         }.onFailure {
             if (it is CancellationException) throw it
             KLogger.e(it) { "failed to import bundled developer key" }
@@ -794,18 +869,23 @@ internal class LocalPgpRepository(
             // behind — the key stayed in the list until a second delete.
             val user = userPreferences.getUser() as AppUser.LoggedIn
             var deletedAny = false
-            keyFiles(user.userName).forEach { file ->
-                val primaries = runCatching { processKeyRing(file.absolutePath, file.name) }
-                    .getOrElse { emptyList() }
-                    .map { it.key }
-                if (primaries.none { it.keyId == keyId }) return@forEach
-                if (primaries.any { it.keyId != keyId }) {
-                    // Mixed-ring file (e.g. an imported collection): deleting the whole file would
-                    // take unrelated keys with it. Leave it and surface the partial delete.
-                    KLogger.e { "deletePgpKey: ${file.name} also contains other keys; not deleting it" }
-                    return@forEach
+            // Each file is parsed to decide whether it holds only this key, and then deleted on the
+            // strength of that answer - read and delete both inside, or a sync could replace a ring
+            // between the two and the delete would remove a file nobody inspected.
+            inKeyDirectory(user.userName) {
+                keyFiles(user.userName).forEach { file ->
+                    val primaries = runCatching { processKeyRing(file.absolutePath, file.name) }
+                        .getOrElse { emptyList() }
+                        .map { it.key }
+                    if (primaries.none { it.keyId == keyId }) return@forEach
+                    if (primaries.any { it.keyId != keyId }) {
+                        // Mixed-ring file (e.g. an imported collection): deleting the whole file would
+                        // take unrelated keys with it. Leave it and surface the partial delete.
+                        KLogger.e { "deletePgpKey: ${file.name} also contains other keys; not deleting it" }
+                        return@forEach
+                    }
+                    if (file.delete()) deletedAny = true
                 }
-                if (file.delete()) deletedAny = true
             }
             if (deletedAny) {
                 Outcome.Success(Unit)

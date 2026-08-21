@@ -5,6 +5,7 @@ import ai.passman.keys.model.EDDSA
 import ai.passman.pgp.bundled.BundledDeveloperKey
 import ai.passman.pgp.service.PgpClient
 import ai.passman.pgp.utils.PgpKeys
+import ai.passman.crypto.io.ArtifactDirectoryLock
 import ai.passman.platform.transfer.DirectoryBundler
 import ai.passman.platform.transfer.PgpTransferService
 import ai.passman.repo.Platform
@@ -445,6 +446,125 @@ class LocalPgpRepositoryTest {
         // The only file holding the secret ring is staging debris; exporting it would hand out
         // a path with no durability contract.
         assertIs<Outcome.Error>(repository.getSecretKeyPath(keyId, "test-password"))
+    }
+
+    /**
+     * Every mutating PGP operation takes `pgp/<user>/`'s artifact-directory lock.
+     *
+     * The lock is taken in this class rather than in `PgpClient`, because `PgpClient` is handed file
+     * paths and would have to guess the artifact directory from a ring's own parent — the mistake
+     * `DirectoryBundler` documents for the conflict store. The cost of that choice is that the wrap
+     * is per-call-site and can be dropped by a future edit without breaking any behavioural test,
+     * since the race it reopens needs a concurrent sync to show. Hence these.
+     *
+     * Asserted by holding the lock and watching the call fail to finish. Every operation here is
+     * milliseconds against a temp directory, so a second without completing means it is waiting, and
+     * the only thing it can be waiting for is the lock this thread holds.
+     */
+    @Test
+    fun importPgpFile_takesTheArtifactLock() {
+        val exported = File(localDir, "friend_public.asc").apply { writeBytes(publicRingFile.readBytes()) }
+        assertHoldsArtifactLockWhileRunning("importPgpFile") { repository.importPgpFile(exported.absolutePath) }
+    }
+
+    @Test
+    fun deletePgpKey_takesTheArtifactLock() {
+        val keyId = runBlocking { repository.getKeys().single().publicKey.keyId }
+        assertHoldsArtifactLockWhileRunning("deletePgpKey") { repository.deletePgpKey(keyId) }
+    }
+
+    @Test
+    fun createPgpKey_takesTheArtifactLock() {
+        assertHoldsArtifactLockWhileRunning("createPgpKey") {
+            repository.createPgpKey(
+                name = "fresh",
+                email = "fresh@example.com",
+                password = "test-password",
+                algorithm = ai.passman.domain.pgp.model.PgpKeyAlgorithm.ED25519,
+                length = 256,
+                expiration = 0,
+            )
+        }
+    }
+
+    @Test
+    fun changeKeyPassword_takesTheArtifactLock() {
+        val pair = runBlocking { repository.getKeys().single() }
+        assertHoldsArtifactLockWhileRunning("changeKeyPassword") {
+            repository.changeKeyPassword(pair, "test-password", "another-password")
+        }
+    }
+
+    @Test
+    fun modifySubKey_takesTheArtifactLock() {
+        val pair = runBlocking { repository.getKeys().single() }
+        val subKeyId = requireNotNull(pair.secretKey).keyId.toString()
+        assertHoldsArtifactLockWhileRunning("modifySubKey") {
+            repository.modifySubKey(pair, "test-password", subKeyId, ai.passman.domain.pgp.model.SubKeyAction.REVOKE)
+        }
+    }
+
+    /**
+     * Assert [call] actually **holds** the artifact-directory lock while it runs.
+     *
+     * Not "assert it fails to finish within a second". That was the first version of this helper and
+     * it was worthless for exactly the calls that matter: a key-password change or an RSA keygen
+     * takes longer than a second on its own, so the assertion passed whether or not the lock was
+     * ever taken. Mutation caught it — deleting the wrap from `changeKeyPassword` left the test
+     * green.
+     *
+     * This observes the lock itself instead, which is independent of how long the call takes. While
+     * the worker runs, the probe repeatedly asks the OS for the same file lock. Within one JVM a
+     * request that collides with an existing lock raises [OverlappingFileLockException] rather than
+     * waiting, so one such observation is proof the call was holding it at that instant. A call that
+     * never takes the lock produces no observation however long it runs.
+     */
+    private fun assertHoldsArtifactLockWhileRunning(name: String, call: suspend () -> Unit) {
+        val lockFile = File(pgpUserDir.parentFile, "${pgpUserDir.name}.lock")
+        val running = java.util.concurrent.atomic.AtomicBoolean(true)
+        var observed = false
+
+        val worker = kotlin.concurrent.thread {
+            try {
+                runCatching { runBlocking { call() } }
+            } finally {
+                running.set(false)
+            }
+        }
+        while (running.get() && !observed) {
+            observed = artifactLockIsHeld(lockFile)
+            Thread.onSpinWait()
+        }
+        worker.join(java.util.concurrent.TimeUnit.SECONDS.toMillis(120))
+
+        assertTrue(
+            observed,
+            "$name must hold the artifact-directory lock while it writes; the probe never once " +
+                "collided with it",
+        )
+    }
+
+    /** True when some code in this JVM currently holds the OS lock on [lockFile]. */
+    private fun artifactLockIsHeld(lockFile: File): Boolean {
+        if (!lockFile.isFile) return false
+        return try {
+            java.nio.channels.FileChannel.open(
+                lockFile.toPath(),
+                java.nio.file.StandardOpenOption.WRITE,
+            ).use { channel ->
+                val lock = channel.tryLock()
+                if (lock == null) {
+                    true // held by another process; cannot happen in a test, but it is still "held"
+                } else {
+                    lock.release()
+                    false
+                }
+            }
+        } catch (_: java.nio.channels.OverlappingFileLockException) {
+            true // held elsewhere in this JVM - the worker
+        } catch (_: java.io.IOException) {
+            false
+        }
     }
 
     @Test
