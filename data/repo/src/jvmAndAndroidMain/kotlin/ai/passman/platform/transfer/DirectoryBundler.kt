@@ -1,14 +1,12 @@
 package ai.passman.platform.transfer
 
+import ai.passman.crypto.io.ArtifactDirectoryLock
 import ai.passman.crypto.io.DurableFiles
 import ai.passman.keystore.KeystoreClient
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
 import java.security.MessageDigest
-import kotlin.concurrent.withLock
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.locks.ReentrantLock
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -198,27 +196,33 @@ object DirectoryBundler {
     }
 
     /**
-     * Serialises unbundles per destination directory.
+     * Serialises everything that writes [destDir], which is more than this object.
      *
-     * Two unbundles into one directory are reachable: two peers pushing the same artifact at once
-     * (the receive server registers plain Ktor routes and serialises nothing), or a peer's push
-     * overlapping a locally started pull. They would otherwise share one staging directory — its
-     * name is derived from the destination — and the second one's entry-time wipe would delete the
-     * first one's extracted files mid-flight, leaving the first to commit a file the second is
-     * still writing. Renaming a half-written ring over a live one is the exact outcome the staging
-     * directory exists to prevent.
+     * Two unbundles into one directory are reachable on their own: two peers pushing the same
+     * artifact at once (the receive server registers plain Ktor routes and serialises nothing), or
+     * a peer's push overlapping a locally started pull. They would otherwise share one staging
+     * directory — its name is derived from the destination — and the second one's entry-time wipe
+     * would delete the first one's extracted files mid-flight, leaving the first to commit a file
+     * the second is still writing.
+     *
+     * But the writers that matter most are outside this file. [preserveDisplaced] renames the live
+     * artifact away and the caller then renames the inbound version in, and a foreground key edit
+     * landing between those two steps used to be overwritten having never been preserved. Closing
+     * that needed a lock the *writers* could take too, and they live in modules below this one —
+     * hence [ArtifactDirectoryLock], beside `DurableFiles` in `data:crypto`, which every writer can
+     * already see. This function delegates rather than keeping a second registry: two maps keyed on
+     * the same directory would be worse than none, because each would look like exclusion while
+     * ordering nothing against the other.
      *
      * A plain lock rather than a Mutex because this function is not suspending and every caller is
-     * already on an IO dispatcher doing blocking file work. Keyed on the canonical path so two
-     * File objects naming one directory share a lock; the map holds one entry per artifact
-     * directory per account, which is a handful for the life of the process.
+     * already on an IO dispatcher doing blocking file work.
+     *
+     * @throws ai.passman.crypto.io.ArtifactDirectoryBusyException if the lock cannot be had inside
+     *   its budget. Thrown before [body] runs, so a rejected push or a failed key write leaves
+     *   every file exactly as it was.
      */
-    private fun <T> withDestinationLock(destDir: File, body: () -> T): T {
-        val key = runCatching { destDir.canonicalFile.path }.getOrElse { destDir.path }
-        return destinationLocks.computeIfAbsent(key) { ReentrantLock() }.withLock(body)
-    }
-
-    private val destinationLocks = ConcurrentHashMap<String, ReentrantLock>()
+    private fun <T> withDestinationLock(destDir: File, body: () -> T): T =
+        ArtifactDirectoryLock.withLock(destDir, body)
 
     private fun unbundleLocked(
         bundleBytes: ByteArray,
@@ -423,9 +427,11 @@ object DirectoryBundler {
      * the latter yields `destDir/sub.conflicts`, a **child** of the bundled tree, which the next
      * outbound bundle would ship to every peer: a local safety copy turned into a key-material leak.
      *
-     * Honest about what this does not buy: a foreground writer can still recreate the live path in
-     * the window between this rename and the caller's replace, and that write is then overwritten
-     * unpreserved. Closing it needs a lock shared with every writer, not just with unbundle.
+     * The window between this rename and the caller's replace is closed by
+     * [ArtifactDirectoryLock], which every foreground writer into this directory takes as well —
+     * that is the whole reason the lock registry sits in `data:crypto` rather than here. Before it
+     * existed a writer could recreate the live path in that window and be overwritten unpreserved,
+     * which was the last way sync could lose a version.
      */
     private fun preserveDisplaced(live: File, destDir: File, relative: String): File? {
         if (!live.isFile) return null
@@ -437,7 +443,8 @@ object DirectoryBundler {
         // Reading the live file to decide what to do and *then* acting on that same path is how
         // bytes get lost: a foreground key edit can publish a new version in between, and the
         // action is applied to bytes nobody ever looked at. That is not hypothetical — the PGP
-        // writer publishes secret rings by atomic rename onto exactly this path. An earlier
+        // writer rewrites secret rings straight onto this path with a truncating FileOutputStream,
+        // no temp file and no rename, so mid-write the path holds a partial ring. An earlier
         // version of this function ended its equality branch with `live.delete()`, which meant a
         // version that landed in that window was deleted having never been preserved.
         //
