@@ -725,6 +725,15 @@ internal class LocalPgpRepository(
                 // The per-user dir otherwise only exists once key generation has run; importing
                 // into a fresh account must not depend on that.
                 destination.parent?.let { Files.createDirectories(it) }
+                // Import keeps the SOURCE's filename, so it can land on a ring that is already
+                // there — and `REPLACE_EXISTING` destroyed it. Sync stopped being able to lose key
+                // material; this was the same loss through a different door, and the invariant is
+                // about the artifact, not about which code path reached it. The displaced ring goes
+                // where a sync-displaced one goes, and is restorable from the same screen.
+                DirectoryBundler.preserveBeforeOverwriting(
+                    File("$pgpDir${user.userName}"),
+                    source.fileName.toString(),
+                )
                 Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING)
             }
 

@@ -129,7 +129,7 @@ fun PreservedCopiesScreen(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(text = "Replaced by Sync", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+        Text(text = "Replaced Versions", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
         Text(
             text = "When a sync brought in a file that would have replaced one of yours, the version " +
                 "already here was kept instead of overwritten. Nothing was lost — these are those " +

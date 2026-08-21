@@ -17,8 +17,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * Drives the "Replaced by Sync" recovery screen: the versions an inbound sync moved aside instead of
+ * Drives the "Replaced Versions" recovery screen: the versions something moved aside instead of
  * overwriting, and the three things the user can do with one.
+ *
+ * Titled for the *displacement*, not for sync, because sync is no longer the only thing that puts a
+ * copy here. A restore displaces whatever is currently live — it swaps rather than removes — and a
+ * local import of a ring or keystore whose filename matches one already present preserves the
+ * existing file instead of replacing it. "Replaced by Sync" was already inaccurate for the first of
+ * those before the second existed.
  *
  * Every action here reaches real key material, so all three are staged rather than executed on the
  * tap — restore rewrites what is live, delete is final, and export puts a possible secret ring in

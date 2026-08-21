@@ -214,6 +214,13 @@ class LocalKeystoreRepository(
                 // The per-user dir otherwise only exists once a keystore has been saved; importing
                 // into a fresh account must not depend on that.
                 destination.parent?.let { Files.createDirectories(it) }
+                // Same as the PGP import: the source's filename can land on a keystore already
+                // there, and REPLACE_EXISTING destroyed it. Preserved instead, into the store the
+                // recovery screen reads.
+                DirectoryBundler.preserveBeforeOverwriting(
+                    File("$keystoreDir${user.userName}"),
+                    source.fileName.toString(),
+                )
                 Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING)
             }
 

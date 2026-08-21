@@ -135,7 +135,7 @@ fun SettingsContent(
 
         SettingsText(
             icon = replacedBySyncIcon,
-            name = "Replaced by Sync",
+            name = "Replaced Versions",
             onClick = onReplacedBySyncClick,
         )
 

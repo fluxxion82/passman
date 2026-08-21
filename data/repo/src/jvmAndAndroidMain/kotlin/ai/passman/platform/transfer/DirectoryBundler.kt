@@ -488,6 +488,25 @@ object DirectoryBundler {
     }
 
     /**
+     * Move whatever is live at [relative] inside [destDir] into the conflict store, if anything is.
+     *
+     * The same displacement [unbundle] performs, exposed for the writers that are **not** sync. Local
+     * import is the one that matters: it keeps the source's own filename, so importing a ring or a
+     * keystore whose name matches one already there used to replace it outright with
+     * `Files.copy(REPLACE_EXISTING)`. Sync stopped being able to destroy key material; import could
+     * still do it through a different door, and the invariant is about the artifact, not about which
+     * code path reached it.
+     *
+     * Takes the same per-destination lock, and is reentrant, so a caller already holding it — the
+     * import paths hold it across their own write — simply re-enters.
+     *
+     * @return the preserved copy, or null when nothing was live at that path.
+     */
+    fun preserveBeforeOverwriting(destDir: File, relative: String): File? = withDestinationLock(destDir) {
+        preserveDisplaced(File(destDir, relative), destDir, relative)
+    }
+
+    /**
      * `<path>.<digest>.<ext>` — the original name stays legible while the digest keeps it unique.
      *
      * The bundle-relative path is folded in, so `a/x` and `b/x` cannot land on one name in the flat

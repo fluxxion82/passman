@@ -4,6 +4,7 @@ import ai.passman.cache.KeyCacheManager
 import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.keystore.JvmKeyStoreClient
 import ai.passman.platform.transfer.KeystoreTransferService
+import ai.passman.platform.transfer.DirectoryBundler
 import ai.passman.repo.Platform
 import ai.passman.repo.di.KEYSTORE_CACHE
 import ai.passman.domain.base.DefaultContextFacade
@@ -562,6 +563,31 @@ class LocalKeystoreRepositoryTest {
                 "\"$typed\" must leave the identity store byte for byte as it was",
             )
         }
+    }
+
+    /**
+     * Import preserves a keystore it would have replaced, instead of destroying it.
+     *
+     * Same door as the PGP import: the source's filename can match one already in the directory, and
+     * `Files.copy(REPLACE_EXISTING)` overwrote it. The identity store was already refused by name;
+     * every other keystore was simply lost.
+     */
+    @Test
+    fun importKeystoreFile_preservesTheKeystoreItWouldHaveReplaced() = runBlocking {
+        val displaced = ByteArray(64) { 0x6D }
+        val live = File(keystoreDir, "work.pfx").apply { writeBytes(displaced) }
+        val incoming = File(localDir, "work.pfx").apply { writeBytes(ByteArray(48) { 0x7E }) }
+
+        assertIs<Outcome.Success<Unit>>(repository.importKeystoreFile(incoming.absolutePath))
+
+        assertContentEquals(ByteArray(48) { 0x7E }, live.readBytes(), "the imported keystore is live")
+        val preserved = DirectoryBundler.preservedCopies(keystoreDir)
+        assertEquals(1, preserved.size, "exactly one version was displaced")
+        assertContentEquals(
+            displaced,
+            preserved.single().readBytes(),
+            "and the keystore it replaced was kept, not destroyed",
+        )
     }
 
     /**

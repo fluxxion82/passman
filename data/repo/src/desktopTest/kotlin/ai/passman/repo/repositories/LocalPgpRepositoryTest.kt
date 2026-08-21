@@ -25,6 +25,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertContentEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
@@ -461,6 +462,53 @@ class LocalPgpRepositoryTest {
      * milliseconds against a temp directory, so a second without completing means it is waiting, and
      * the only thing it can be waiting for is the lock this thread holds.
      */
+    /**
+     * Import preserves a ring it would have replaced, instead of destroying it.
+     *
+     * Import keeps the SOURCE's filename, so a file named after one already in the key directory
+     * landed on it and `Files.copy(REPLACE_EXISTING)` overwrote it outright. Sync stopped being able
+     * to lose key material; this was the same loss through a different door — no conflict, no peer,
+     * no exotic input, just a picker and a matching name.
+     *
+     * The displaced file goes where a sync-displaced one goes and is restorable from the same screen,
+     * which is why that screen is titled for the displacement rather than for sync.
+     */
+    @Test
+    fun importPgpFile_preservesTheRingItWouldHaveReplaced() = runBlocking {
+        val displaced = ByteArray(64) { 0x5E }
+        val live = File(pgpUserDir, "friend_public.asc").apply { writeBytes(displaced) }
+        val incoming = File(localDir, "friend_public.asc").apply { writeBytes(publicRingFile.readBytes()) }
+
+        assertIs<Outcome.Success<Unit>>(repository.importPgpFile(incoming.absolutePath))
+
+        assertContentEquals(
+            publicRingFile.readBytes(),
+            live.readBytes(),
+            "the imported ring is live afterwards",
+        )
+        val preserved = DirectoryBundler.preservedCopies(pgpUserDir)
+        assertEquals(1, preserved.size, "exactly one version was displaced")
+        assertContentEquals(
+            displaced,
+            preserved.single().readBytes(),
+            "and the ring it replaced was kept, not destroyed",
+        )
+    }
+
+    /** The ordinary case still writes straight through, with nothing to preserve. */
+    @Test
+    fun importPgpFile_preservesNothingWhenTheNameIsFree() = runBlocking {
+        val incoming = File(localDir, "brand_new.asc").apply { writeBytes(publicRingFile.readBytes()) }
+
+        assertIs<Outcome.Success<Unit>>(repository.importPgpFile(incoming.absolutePath))
+
+        assertTrue(File(pgpUserDir, "brand_new.asc").isFile)
+        assertTrue(
+            DirectoryBundler.preservedCopies(pgpUserDir).isEmpty(),
+            "importing to a free name displaces nothing",
+        )
+    }
+
     @Test
     fun importPgpFile_takesTheArtifactLock() {
         val exported = File(localDir, "friend_public.asc").apply { writeBytes(publicRingFile.readBytes()) }
