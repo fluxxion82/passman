@@ -151,12 +151,31 @@ object ArtifactDirectoryLock {
     /**
      * `<artifactDirectory>.lock`, resolved as a true sibling.
      *
+     * Derived from the **canonical** form, matching [canonicalKey], and that pairing is the point.
+     * The monitor is keyed canonically so two spellings of one directory share it; if the lock file
+     * were derived from the merely-absolute path they could share a monitor and still lock two
+     * different files.
+     *
+     * A symlinked *prefix* is harmless — paths through it resolve to the same inodes, so
+     * `link/alice.lock` and `real/alice.lock` are one file. The case that diverges is the directory's
+     * own final component being a link: `aliaslink` -> `alice` gives `aliaslink.lock` from the
+     * absolute path and `alice.lock` from the canonical one. In-JVM exclusion hides the difference,
+     * because only the outermost holder ever asks the file lock, so a second *process* using the
+     * other spelling would lock the other file and proceed. Nothing in this app spells these paths
+     * two ways today; the two derivations agreeing is what keeps that from mattering if one ever
+     * does.
+     *
+     * Falls back to the absolute path when canonicalisation fails, for the same reason
+     * [canonicalKey] does: a relative path would put the lock file wherever the process happened to
+     * be started from.
+     *
      * @throws IllegalArgumentException if the directory has no parent — which would mean an artifact
      *   directory at a filesystem root, and there is nowhere safe to put the lock file. Failing is
      *   correct: the alternative fallbacks all put it inside the bundled tree.
      */
     private fun lockFileFor(artifactDirectory: File): File {
-        val resolved = artifactDirectory.absoluteFile
+        val resolved = runCatching { artifactDirectory.canonicalFile }
+            .getOrElse { artifactDirectory.absoluteFile }
         val parent = requireNotNull(resolved.parentFile) {
             "artifact directory has no parent, so its lock file has nowhere to live: $artifactDirectory"
         }

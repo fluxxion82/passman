@@ -245,6 +245,47 @@ class ArtifactDirectoryLockTest {
     }
 
     /**
+     * When the artifact directory's own final component is a symlink, the lock file follows the
+     * **canonical** name — so a second spelling cannot lock a second file.
+     *
+     * A symlinked *parent* is not the interesting case and cannot show this: paths through it
+     * resolve to the same inodes, so `link/alice.lock` and `real/alice.lock` are one file either
+     * way. It is when the directory itself is the link that the two derivations diverge —
+     * `aliaslink` -> `alice` yields `aliaslink.lock` from the absolute path and `alice.lock` from the
+     * canonical one, two genuinely different files.
+     *
+     * That matters because the monitor is keyed canonically, so both spellings share it and in-JVM
+     * exclusion looks fine; only the outermost holder ever asks the file lock. A second *process*
+     * using the other spelling would lock the other file and walk straight through. Keying the
+     * monitor and deriving the lock file the same way is what forecloses it.
+     */
+    @Test
+    fun aSymlinkedDirectoryLocksTheCanonicalFileNotOneBesideTheLink() {
+        val canonicalDir = File(tempDir, "alice").apply { mkdirs() }
+        val linkDir = File(tempDir, "aliaslink")
+        java.nio.file.Files.createSymbolicLink(linkDir.toPath(), canonicalDir.toPath())
+
+        ArtifactDirectoryLock.withLock(linkDir) {
+            val canonicalLock = File(tempDir, "alice.lock")
+            assertTrue(
+                canonicalLock.isFile,
+                "the lock file must be named for the canonical directory, not the link",
+            )
+            assertFalse(
+                File(tempDir, "aliaslink.lock").isFile,
+                "and no second lock file may appear beside the link",
+            )
+            FileChannel.open(canonicalLock.toPath(), StandardOpenOption.WRITE).use { channel ->
+                assertFailsWith<OverlappingFileLockException>(
+                    "the canonical lock file must be the one actually held",
+                ) {
+                    channel.tryLock()
+                }
+            }
+        }
+    }
+
+    /**
      * And two spellings really are mutually exclusive across threads.
      *
      * Weaker than the test above — the file lock alone would satisfy it — but it states the
