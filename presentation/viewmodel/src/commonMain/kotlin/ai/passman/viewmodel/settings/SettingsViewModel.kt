@@ -1,6 +1,7 @@
 package ai.passman.viewmodel.settings
 
 import ai.passman.domain.base.invoke
+import ai.passman.domain.initialization.GetAppVersion
 import ai.passman.domain.settings.GetClipboardExpiry
 import ai.passman.domain.settings.CopyToClipboard
 import ai.passman.domain.settings.GetThemeMode
@@ -32,6 +33,7 @@ open class SettingsViewModel(
     private val setThemeMode: SetThemeMode,
     private val getBiometricUnlockState: GetBiometricUnlockState,
     private val setBiometricUnlock: SetBiometricUnlock,
+    private val getAppVersion: GetAppVersion,
     private val getPortableVaultAccess: GetPortableVaultAccess? = null,
     private val copyToClipboard: CopyToClipboard? = null,
     private val upgradePortableVaultRecovery: UpgradePortableVaultRecovery? = null,
@@ -79,6 +81,12 @@ open class SettingsViewModel(
      */
     val clipboardExpirySeconds = MutableStateFlow(ClipboardExpiry.Default.duration.inWholeSeconds)
     val themeMode = MutableStateFlow(ThemeMode.System)
+
+    /**
+     * Empty until the read lands, and empty is what the row renders as nothing at all — a build
+     * line that flashes a placeholder is worse than one that appears a frame late.
+     */
+    val appVersion = MutableStateFlow("")
     val portableVaultAccess = MutableStateFlow<PortableVaultAccess?>(null)
     val portableVaultDialogVisible = MutableStateFlow(false)
 
@@ -135,6 +143,9 @@ open class SettingsViewModel(
             val stored = getThemeMode()
             if (themeChangedByUser) return@launch
             themeMode.value = stored
+        }
+        viewModelScope.launch {
+            appVersion.value = getAppVersion()
         }
         refreshBiometricUnlock()
     }

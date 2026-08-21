@@ -65,6 +65,7 @@ fun SettingsScreen(
     val biometricPassword by presenter.biometricPassword.collectAsState()
     val isEnrollingBiometric by presenter.isEnrollingBiometric.collectAsState()
     val biometricUnlockError by presenter.biometricUnlockError.collectAsState()
+    val appVersion by presenter.appVersion.collectAsState()
 
     SettingsContent(
         oldPassword = oldPass,
@@ -79,6 +80,7 @@ fun SettingsScreen(
         biometricPassword = biometricPassword,
         isEnrollingBiometric = isEnrollingBiometric,
         biometricUnlockError = biometricUnlockError,
+        appVersion = appVersion,
         onOldPassUpdated = presenter::onOldPasswordChanged,
         onNewPassUpdated = presenter::onNewPasswordChanged,
         onChangePasswordDialogOpened = presenter::onChangePasswordDialogOpened,
@@ -131,6 +133,7 @@ fun PreviewSettings() {
         biometricPassword = "",
         isEnrollingBiometric = false,
         biometricUnlockError = null,
+        appVersion = "v1.0.0 (6)",
         onOldPassUpdated = {},
         onNewPassUpdated = {},
         onChangePasswordDialogOpened = {},

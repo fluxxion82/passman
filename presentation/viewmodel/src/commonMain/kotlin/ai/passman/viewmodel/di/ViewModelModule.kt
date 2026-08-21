@@ -84,6 +84,7 @@ val viewModelModule = module {
             setThemeMode = get(),
             getBiometricUnlockState = get(),
             setBiometricUnlock = get(),
+            getAppVersion = get(),
             getPortableVaultAccess = get(),
             copyToClipboard = get(),
             upgradePortableVaultRecovery = get(),

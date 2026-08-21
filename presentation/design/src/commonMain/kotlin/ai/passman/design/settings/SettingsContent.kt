@@ -62,6 +62,7 @@ fun SettingsContent(
     isEnrollingBiometric: Boolean,
     biometricUnlockError: String?,
     themeMode: ThemeMode,
+    appVersion: String,
     onOldPassUpdated: (String) -> Unit,
     onNewPassUpdated: (String) -> Unit,
     onChangePasswordDialogOpened: () -> Unit,
@@ -163,9 +164,12 @@ fun SettingsContent(
             summary = "Choose whether Passman follows your device or stays light or dark.",
             selectedMode = themeMode,
             onModeSelected = onThemeModeSelected,
-            // Last row: no trailing divider. Move this flag if a row is ever appended below.
+            // Last row: no trailing divider. Move this flag if a row is ever appended below. The
+            // build line under it is not a row — it takes no divider and is not tappable.
             showDivider = false,
         )
+
+        AppVersionLabel(appVersion)
 
         if (biometricPasswordDialogVisible) {
             Dialog(
@@ -194,6 +198,31 @@ fun SettingsContent(
             )
         }
     }
+}
+
+/**
+ * The build identity, centred under the last setting.
+ *
+ * It rides at the end of the same scrolling column rather than being pinned to the window, because
+ * the settings list is already taller than every screen it renders on — a pinned line would sit on
+ * top of the rows instead of after them.
+ *
+ * Blank while the read is in flight, and blank means nothing is drawn: no reserved gap that shifts
+ * the list a frame later.
+ */
+@Composable
+private fun AppVersionLabel(appVersion: String) {
+    if (appVersion.isBlank()) return
+
+    Text(
+        text = appVersion,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp, bottom = 24.dp),
+    )
 }
 
 /**

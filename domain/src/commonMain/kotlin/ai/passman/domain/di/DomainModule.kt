@@ -27,6 +27,7 @@ import ai.passman.domain.connectivity.RemoveTrustedDevice
 import ai.passman.domain.connectivity.UpdateTrustedDeviceHost
 import ai.passman.domain.identification.UpdateIdentifier
 import ai.passman.domain.initialization.AppInitializer
+import ai.passman.domain.initialization.GetAppVersion
 import ai.passman.domain.initialization.InitializeApplication
 import ai.passman.domain.keystore.AddKeyStoreEntry
 import ai.passman.domain.keystore.AddKeystoreKey
@@ -138,6 +139,7 @@ val domainModule = module {
 
     single { InitializeApplication(initializers = getKoin().getAll<AppInitializer>().toSet(), contextFacade = get()) }
     single { UpdateIdentifier(repository = get()) }
+    single { GetAppVersion(appInformation = get()) }
     single { ExitApp() }
 
     // Keystore

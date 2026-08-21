@@ -18,6 +18,10 @@ import ai.passman.domain.settings.repository.ClipboardPreferences
 import ai.passman.domain.settings.repository.ThemePreferences
 import ai.passman.domain.user.ChangeUserPassword
 import ai.passman.domain.user.GetBiometricUnlockState
+import ai.passman.domain.initialization.GetAppVersion
+import ai.passman.domain.initialization.models.AppInformation
+import ai.passman.domain.initialization.models.Environment
+import ai.passman.domain.initialization.models.Version
 import ai.passman.domain.user.SetBiometricUnlock
 import ai.passman.domain.user.exception.AuthFailure
 import ai.passman.domain.user.models.BiometricAvailability
@@ -85,6 +89,7 @@ class SettingsViewModelTest {
         setThemeMode = SetThemeMode(themePreferences),
         getBiometricUnlockState = GetBiometricUnlockState(biometrics, RecordingUserPreferences),
         setBiometricUnlock = SetBiometricUnlock(biometrics, RecordingUserPreferences),
+        getAppVersion = GetAppVersion(TEST_APP_INFORMATION),
         getPortableVaultAccess = getPortableVaultAccess,
         copyToClipboard = copyToClipboard,
         upgradePortableVaultRecovery = upgradePortableVaultRecovery,
@@ -626,3 +631,13 @@ private class FakeBiometricUnlockRepository(
     /** The settings toggle never consults this; it is here so the fake satisfies the contract. */
     private val offered = mutableSetOf<String>()
 }
+
+/** Only the version name and build number are read from it; the rest is filler the type requires. */
+private val TEST_APP_INFORMATION = AppInformation(
+    version = Version(name = "1.0.0", build = "0", additionalInfo = ""),
+    versionCode = 6,
+    id = "ai.passman",
+    environment = Environment.PROD,
+    debug = false,
+    userHomeDir = "/tmp",
+)
