@@ -20,19 +20,6 @@ interface PasswordRepository {
     suspend fun getPasswordEntries(): List<PasswordEntry>
 
     /**
-     * Like [getPasswordEntries] but a failed read is an [Outcome.Error]
-     * ([ai.passman.domain.password.exception.PasswordFailure.VaultUnreadable]) instead of an
-     * empty list. [getPasswordEntries] deliberately flattens an unreadable vault to `emptyList()`
-     * for display; a caller that acts on the *absence* of an entry cannot use that answer, because
-     * "the vault holds no such row" and "the vault could not be read" would look identical. A pure
-     * read: never renumbers, migrates or writes anything.
-     *
-     * Default wraps [getPasswordEntries] so in-memory fakes keep working; real implementations
-     * override it to surface the failure.
-     */
-    suspend fun listPasswordEntries(): Outcome<List<PasswordEntry>> = Outcome.Success(getPasswordEntries())
-
-    /**
      * Applies [entry]'s fields to *one* vault row with the same [PasswordEntry.uuid].
      *
      * At most one, deliberately: identities derived for entries that predate the field are unique

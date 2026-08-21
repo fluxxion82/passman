@@ -12,7 +12,6 @@ import ai.passman.domain.password.repository.PasswordRepository
 class FakePasswordRepository(
     private val entries: () -> List<PasswordEntry> = { unsupported("getPasswordEntries") },
     private val add: suspend (AddPassword.EntryData) -> Boolean = { unsupported("addPasswordEntry") },
-    private val list: suspend () -> Outcome<List<PasswordEntry>> = { Outcome.Success(entries()) },
     private val push: suspend (TrustedDevice) -> Outcome<Unit> = { unsupported("pushPasswordDatabase") },
     private val pull: suspend (TrustedDevice) -> Outcome<Unit> = { unsupported("pullPasswordDatabase") },
 ) : PasswordRepository {
@@ -25,8 +24,6 @@ class FakePasswordRepository(
     }
 
     override suspend fun getPasswordEntries(): List<PasswordEntry> = entries()
-
-    override suspend fun listPasswordEntries(): Outcome<List<PasswordEntry>> = list()
 
     override suspend fun updatePasswordEntry(entry: PasswordEntry): Boolean = unsupported("updatePasswordEntry")
     override suspend fun deletePasswordEntry(passwordUuid: String): Boolean = unsupported("deletePasswordEntry")

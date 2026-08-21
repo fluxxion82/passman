@@ -819,67 +819,6 @@ internal class LocalPgpRepository(
         }
     }
 
-    override suspend fun createDefaultKeyRings(passphrase: String): Outcome<Unit> =
-        withContext(coroutinesContextFacade.io) {
-            runCatching {
-                val user = userPreferences.getUser() as AppUser.LoggedIn
-                // Occupant guard: PgpClient.createKeyRings overwrites, and a file already under a
-                // default-ring name may be real key material a peer synced over (or an import).
-                // Creating a ring must never destroy keys — refuse instead.
-                val occupied = defaultRingFiles(user.userName).filter { it.exists() && it.length() > 0L }
-                if (occupied.isNotEmpty()) {
-                    KLogger.e {
-                        "createDefaultKeyRings: refusing — ${occupied.joinToString { it.name }} already present"
-                    }
-                    return@withContext Outcome.Error(
-                        "default ring files already exist",
-                        // Distinguishable on purpose: the condition is permanent, and the caller
-                        // flags the account settled instead of re-failing on every login.
-                        PgpFailure.DefaultRingsOccupied,
-                    )
-                }
-                pgpClient.createKeyRings(
-                    userId = user.userName,
-                    password = passphrase,
-                    keyDirectory = pgpDir,
-                    secretKeyRingFilename = PgpClient.DEFAULT_SECRET_RING_FILENAME,
-                    publicKeyRingFilename = PgpClient.DEFAULT_PUBLIC_RING_FILENAME,
-                    // [passphrase] is a generated secret, never user-typed — see
-                    // PgpClient.PROVISIONED_RING_S2K_COUNT for why that changes the S2K cost.
-                    s2kCount = PgpClient.PROVISIONED_RING_S2K_COUNT,
-                ).getOrThrow()
-                Outcome.Success(Unit)
-            }.getOrElse {
-                if (it is CancellationException) throw it
-                KLogger.e(it) { "failed to create default key rings" }
-                Outcome.Error("failed to create default key rings", PgpFailure.GeneralPgpError("keygen failed"))
-            }
-        }
-
-    override suspend fun deleteDefaultKeyRings(): Outcome<Unit> = withContext(coroutinesContextFacade.io) {
-        runCatching {
-            val user = userPreferences.getUser() as AppUser.LoggedIn
-            // ONLY the two fixed-name default ring files — this is rollback plumbing for rings
-            // whose passphrase could not be recorded, never a general key delete.
-            defaultRingFiles(user.userName).forEach { file ->
-                if (file.exists() && !file.delete()) error("could not delete ${file.name}")
-            }
-            Outcome.Success(Unit)
-        }.getOrElse {
-            if (it is CancellationException) throw it
-            KLogger.e(it) { "failed to delete default key rings" }
-            Outcome.Error("failed to delete default key rings", PgpFailure.DeleteKeyPairFailure)
-        }
-    }
-
-    private fun defaultRingFiles(userName: String): List<File> {
-        val userDir = File("$pgpDir$userName")
-        return listOf(
-            File(userDir, PgpClient.DEFAULT_SECRET_RING_FILENAME),
-            File(userDir, PgpClient.DEFAULT_PUBLIC_RING_FILENAME),
-        )
-    }
-
     override suspend fun transferPgpKeys(device: TrustedDevice): Outcome<Unit> = withContext(coroutinesContextFacade.io) {
         runCatching {
             val user = userPreferences.getUser() as AppUser.LoggedIn

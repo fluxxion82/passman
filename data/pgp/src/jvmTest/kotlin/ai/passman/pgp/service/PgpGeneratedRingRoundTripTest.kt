@@ -1,7 +1,9 @@
 package ai.passman.pgp.service
 
 import ai.passman.domain.base.model.Outcome
+import ai.passman.keys.model.RSA
 import ai.passman.pgp.BaseTest
+import ai.passman.pgp.utils.PgpKeys
 import java.io.File
 import java.nio.file.Files
 import kotlin.test.assertTrue
@@ -167,14 +169,7 @@ class PgpGeneratedRingRoundTripTest : BaseTest() {
         val otherKeyDirectory = Files.createTempDirectory("pgp-other-generated-key-ring").toFile()
 
         try {
-            client.createKeyRings(
-                userId = "other",
-                password = password,
-                keyDirectory = otherKeyDirectory.absolutePath,
-                secretKeyRingFilename = "secret.asc",
-                publicKeyRingFilename = "public.asc",
-            ).getOrThrow()
-            val otherPrivateKeyPath = File(otherKeyDirectory, "other/secret.asc").absolutePath
+            val otherPrivateKeyPath = writeKeyRingPair(otherKeyDirectory, "other", password).secretPath
 
             when (val encrypted = client.signAndEncrypt(original, publicKeyPath, privateKeyPath, password)) {
                 is Outcome.Success -> {
@@ -206,19 +201,36 @@ class PgpGeneratedRingRoundTripTest : BaseTest() {
         private lateinit var privateKeyPath: String
         private lateinit var publicKeyPath: String
 
+        private class KeyRingPaths(val secretPath: String, val publicPath: String)
+
+        /**
+         * The ring these tests run against, built the way the app builds one: the Create Key screen
+         * goes straight to [PgpKeys.createPgpKeyRingGenerator], so that is what "app-generated"
+         * means here. RSA-4096 to match what the screen defaults to.
+         */
+        private fun writeKeyRingPair(directory: File, userId: String, password: String): KeyRingPaths {
+            val generator = PgpKeys.createPgpKeyRingGenerator(
+                userId = userId,
+                algorithm = RSA,
+                length = 4096,
+                expirationInSeconds = 0,
+                password = password,
+            )
+            val userDirectory = File(directory, userId).apply { mkdirs() }
+            val secret = File(userDirectory, "secret.asc")
+            val public = File(userDirectory, "public.asc")
+            PgpKeys.saveSecretKeyRingToFile(generator.generateSecretKeyRing(), secret.absolutePath)
+            PgpKeys.savePublicKeyRingToFile(generator.generatePublicKeyRing(), public.absolutePath)
+            return KeyRingPaths(secretPath = secret.absolutePath, publicPath = public.absolutePath)
+        }
+
         @JvmStatic
         @BeforeClass
         fun createKeyRing() {
             keyDirectory = Files.createTempDirectory("pgp-generated-key-ring").toFile()
-            PgpClient().createKeyRings(
-                userId = userId,
-                password = password,
-                keyDirectory = keyDirectory.absolutePath,
-                secretKeyRingFilename = "secret.asc",
-                publicKeyRingFilename = "public.asc",
-            ).getOrThrow()
-            privateKeyPath = File(keyDirectory, "$userId/secret.asc").absolutePath
-            publicKeyPath = File(keyDirectory, "$userId/public.asc").absolutePath
+            val paths = writeKeyRingPair(keyDirectory, userId, password)
+            privateKeyPath = paths.secretPath
+            publicKeyPath = paths.publicPath
         }
 
         @JvmStatic

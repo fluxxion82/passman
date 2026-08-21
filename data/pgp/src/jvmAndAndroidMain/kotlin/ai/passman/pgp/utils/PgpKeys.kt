@@ -84,13 +84,18 @@ object PgpKeys {
 
     /**
      * [s2kCount] is the coded S2K octet (0x60 = 64KiB hashed, 0xff = ~65MB hashed). The default is
-     * the maximum because a passphrase a user typed deserves every bit of stretching. Rings sealed
-     * with a *generated* high-entropy passphrase pass a low count instead — see
-     * [ai.passman.pgp.service.PgpClient.PROVISIONED_RING_S2K_COUNT] — because against ~157 bits of
-     * passphrase entropy the stretch factor is irrelevant, while on a phone the maximum costs
-     * seconds per key at ring creation and again at every unlock. (A digest-provider swap is NOT a
-     * way out: iterated S2K feeds the digest a few dozen bytes at a time, so a native digest
-     * drowns in per-call overhead and saves nothing.)
+     * the maximum, and every ring this app creates takes it: a ring is sealed with a passphrase the
+     * user typed, and a typed passphrase deserves every bit of stretching.
+     *
+     * The parameter exists for the opposite case — a passphrase generated at full entropy (24
+     * characters over a 93-character alphabet is ~157 bits), against which the stretch factor is
+     * irrelevant while on a phone the maximum costs seconds per key at ring creation and again at
+     * every unlock. Nothing passes a low count today; provisioned rings were the only caller that
+     * ever did, and the app no longer mints any. Anything that starts generating passphrases again
+     * should pass 0x60 rather than pay for stretching that buys nothing.
+     *
+     * (A digest-provider swap is NOT a way out of the cost: iterated S2K feeds the digest a few
+     * dozen bytes at a time, so a native digest drowns in per-call overhead and saves nothing.)
      */
     fun createSecretKeyEncryptor(password: CharArray, s2kCount: Int = 0xff): PBESecretKeyEncryptor {
         val sha256DigestCalculator = BcPGPDigestCalculatorProvider()[HashAlgorithmTags.SHA256]

@@ -30,13 +30,6 @@ sealed class PgpFailure : Failure.FeatureFailure() {
     data object RevokeSubKeyFailure : FeatureFailure()
     data object ChangePasswordFailure : FeatureFailure()
     data object DeleteKeyPairFailure : FeatureFailure()
-
-    /**
-     * `createDefaultKeyRings` refused because a non-empty file already sits under a default ring
-     * name. Distinguished from a generic creation failure because the condition is permanent:
-     * the caller flags the account as settled instead of re-failing on every login.
-     */
-    data object DefaultRingsOccupied : FeatureFailure()
     data object SharePublicKeyFailure : FeatureFailure()
     data object ExportPrivateKeyFailure : FeatureFailure()
 }

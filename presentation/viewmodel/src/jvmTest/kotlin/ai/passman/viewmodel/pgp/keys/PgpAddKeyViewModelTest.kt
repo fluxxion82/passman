@@ -3,7 +3,7 @@ package ai.passman.viewmodel.pgp.keys
 import ai.passman.domain.base.model.Outcome
 import ai.passman.domain.password.AddPassword
 import ai.passman.domain.pgp.CreatePgpKeyPair
-import ai.passman.domain.user.exception.AuthFailure
+import ai.passman.domain.pgp.exception.PgpFailure
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -44,7 +44,7 @@ class PgpAddKeyViewModelTest {
     fun `a second create click while keygen is in flight is ignored`() = runTest {
         coEvery { createPgpKey.invoke(any()) } coAnswers {
             delay(5_000)
-            Outcome.Error("boom", AuthFailure.PgpKeyRingCreationFailure)
+            Outcome.Error("boom", PgpFailure.GeneralPgpError("boom"))
         }
 
         val vm = PgpAddKeyViewModel(createPgpKey = createPgpKey, addPassword = addPassword)

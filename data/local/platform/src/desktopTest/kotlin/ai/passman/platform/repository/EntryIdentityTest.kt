@@ -1054,30 +1054,6 @@ class EntryIdentityTest {
         )
     }
 
-    /**
-     * [listPasswordEntries] hides tombstones too, and it is a separate override from
-     * [getPasswordEntries] — the read that surfaces an unreadable vault as an error rather than as
-     * an empty list, so a caller that has to distinguish "no such entry" from "could not look"
-     * gets a truthful answer either way. A tombstoned row answering as present would tell such a
-     * caller an entry still exists that the user deleted.
-     */
-    @Test
-    fun `a deleted entry is invisible to the error-reporting read too`() = runBlocking<Unit> {
-        settledVault("acme keystore password", "gmail")
-        val repository = repository()
-        val deleted = repository.getPasswordEntries().first { it.entryName == "acme keystore password" }
-        assertTrue(repository.deletePasswordEntry(deleted.uuid))
-
-        val listed = repository.listPasswordEntries()
-
-        assertIs<Outcome.Success<List<PasswordEntry>>>(listed)
-        assertEquals(
-            listOf("gmail"),
-            listed.value.map { it.entryName },
-            "a tombstoned row must read as absent from listPasswordEntries as well",
-        )
-    }
-
     /** A delete of an entry whose twin shares its derived identity must take the live twin. */
     @Test
     fun `deleting both namesakes in turn tombstones one row each time`() = runBlocking<Unit> {

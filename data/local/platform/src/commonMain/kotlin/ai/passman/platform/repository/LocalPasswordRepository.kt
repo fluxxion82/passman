@@ -15,7 +15,6 @@ import ai.passman.logging.KLogger
 import ai.passman.domain.base.CoroutinesContextFacade
 import ai.passman.domain.base.model.Outcome
 import ai.passman.domain.password.AddPassword
-import ai.passman.domain.password.exception.PasswordFailure
 import ai.passman.domain.password.model.EntryActivity
 import ai.passman.domain.password.model.PasswordEntry
 import ai.passman.domain.password.repository.PasswordRepository
@@ -122,10 +121,10 @@ private const val PUBLISH_ATTEMPTS = 3
  *
  * The consequence for everything else in this class is that the entry list it works on is not the
  * entry list its callers see. [parseEntries] and every mutation lambda deal in the stored rows,
- * tombstones included — that is what keeps a deletion alive across a save. Only the two read methods
- * ([getPasswordEntries], [listPasswordEntries]) filter, and they filter on the way *out*, after the
- * write. Filtering earlier would be the same bug in a new place: a mutation that re-published a list
- * with the tombstones already dropped would resurrect every entry the user had ever deleted.
+ * tombstones included — that is what keeps a deletion alive across a save. Only the read method
+ * ([getPasswordEntries]) filters, and it filters on the way *out*, after the write. Filtering
+ * earlier would be the same bug in a new place: a mutation that re-published a list with the
+ * tombstones already dropped would resurrect every entry the user had ever deleted.
  */
 class LocalPasswordRepository(
     private val userPreferences: UserPreferences,
@@ -239,29 +238,6 @@ class LocalPasswordRepository(
             }
             latest
         } ?: emptyList()
-    }
-
-    /**
-     * The error-aware read. A pure read on purpose: unlike [getPasswordEntries] it never renumbers,
-     * migrates or writes anything, and an unreadable vault comes back as
-     * [PasswordFailure.VaultUnreadable] instead of the display path's empty list — a caller that
-     * acts on "the vault does not contain X" must not act on an answer that might merely mean
-     * "could not look".
-     *
-     * Tombstoned rows are filtered out here too, so a deleted entry reads as absent rather than as
-     * a row nobody can see. Being a pure read it does not reap expired tombstones — it only hides
-     * them, which is the same answer.
-     */
-    override suspend fun listPasswordEntries(): Outcome<List<PasswordEntry>> = withContext(coroutinesContextFacade.io) {
-        passmanSessionScope(userPreferences.getSessionId()) { scope ->
-            val user = userPreferences.getUser() as? AppUser.LoggedIn
-                ?: return@passmanSessionScope Outcome.Error("not signed in", PasswordFailure.VaultUnreadable)
-            val vault = openVault(scope, user.userName, "listPasswordEntries")
-                ?: return@passmanSessionScope Outcome.Error("vault unreadable", PasswordFailure.VaultUnreadable)
-            val entries = parseEntries(vault, "listPasswordEntries")
-                ?: return@passmanSessionScope Outcome.Error("vault undecodable", PasswordFailure.VaultUnreadable)
-            Outcome.Success(entries.live().sortedBy { it.entryName.lowercase() })
-        } ?: Outcome.Error("no session", PasswordFailure.VaultUnreadable)
     }
 
     override suspend fun updatePasswordEntry(entry: PasswordEntry): Boolean = withContext(coroutinesContextFacade.io) {

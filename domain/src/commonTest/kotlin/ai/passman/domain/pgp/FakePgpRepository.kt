@@ -27,9 +27,6 @@ class FakePgpRepository(
     private val decryptFile: (path: String) -> Outcome<String> = { unsupported("decryptPgpFile") },
     private val importDeveloperKey: (force: Boolean) -> Outcome<Boolean> = { unsupported("importBundledDeveloperKey") },
     private val keys: () -> List<PgpKeyPair> = { unsupported("getKeys") },
-    private val createDefaultRings: suspend (passphrase: String) -> Outcome<Unit> =
-        { unsupported("createDefaultKeyRings") },
-    private val deleteDefaultRings: () -> Outcome<Unit> = { unsupported("deleteDefaultKeyRings") },
     private val push: suspend (TrustedDevice) -> Outcome<Unit> = { unsupported("pushPgpKeys") },
     private val pull: suspend (TrustedDevice) -> Outcome<Unit> = { unsupported("pullPgpKeys") },
 ) : PgpRepository {
@@ -37,9 +34,6 @@ class FakePgpRepository(
     val encryptCalls = mutableListOf<Pair<String, String>>()
     val decryptCalls = mutableListOf<Triple<String, String, String>>()
     val importDeveloperKeyCalls = mutableListOf<Boolean>()
-    val createDefaultRingCalls = mutableListOf<String>()
-    var deleteDefaultRingCalls = 0
-        private set
 
     override suspend fun encryptPgpMessage(plainText: String, publicKeyPath: String): Outcome<String> {
         encryptCalls += plainText to publicKeyPath
@@ -177,16 +171,6 @@ class FakePgpRepository(
         return importDeveloperKey(force)
     }
     override suspend fun deletePgpKey(keyId: Long): Outcome<Unit> = unsupported("deletePgpKey")
-
-    override suspend fun createDefaultKeyRings(passphrase: String): Outcome<Unit> {
-        createDefaultRingCalls += passphrase
-        return createDefaultRings(passphrase)
-    }
-
-    override suspend fun deleteDefaultKeyRings(): Outcome<Unit> {
-        deleteDefaultRingCalls += 1
-        return deleteDefaultRings()
-    }
 
     override suspend fun transferPgpKeys(device: TrustedDevice): Outcome<Unit> = unsupported("transferPgpKeys")
     override suspend fun pushPgpKeys(device: TrustedDevice): Outcome<Unit> = push(device)

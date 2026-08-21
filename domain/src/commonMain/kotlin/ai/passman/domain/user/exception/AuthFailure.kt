@@ -11,7 +11,6 @@ sealed class AuthFailure {
     object NoStoredCredentials : Failure.FeatureFailure()
     object AccountAlreadyExists : Failure.FeatureFailure()
     object KeystoreCreationFailure : Failure.FeatureFailure()
-    object PgpKeyRingCreationFailure : Failure.FeatureFailure()
 
     /*
      * Biometric unlock, one case per thing the user has to do next. These used to be a single

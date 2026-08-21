@@ -2,7 +2,6 @@ package ai.passman.pgp.service
 
 import ai.passman.keys.model.DSA
 import ai.passman.keys.model.ELGAMAL
-import ai.passman.keys.model.PGPKeyAlgo
 import ai.passman.keys.model.RSA
 import ai.passman.pgp.utils.PgpHelper
 import ai.passman.pgp.utils.PgpKeys
@@ -13,7 +12,6 @@ import ai.passman.domain.pgp.model.PgpKeyPair
 import ai.passman.domain.pgp.model.UserIdAction
 import java.io.*
 import java.util.*
-import kotlin.system.measureTimeMillis
 import org.bouncycastle.bcpg.ArmoredOutputStream
 import org.bouncycastle.bcpg.HashAlgorithmTags
 import org.bouncycastle.bcpg.sig.RevocationReasonTags
@@ -26,28 +24,6 @@ import org.bouncycastle.openpgp.operator.jcajce.JcaPGPContentSignerBuilder
 import org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder
 
 class PgpClient {
-    companion object {
-        /**
-         * File names of the account's default key rings under `pgp/<user>/`. Nothing creates them
-         * automatically — signup and login provision no artifacts — but
-         * `LocalPgpRepository.createDefaultKeyRings` still writes this pair when asked, and the
-         * names are fixed here so a reader and a writer can never drift apart.
-         */
-        const val DEFAULT_SECRET_RING_FILENAME = "passman_secret_ring.asc"
-        const val DEFAULT_PUBLIC_RING_FILENAME = "passman_public_ring.asc"
-
-        /**
-         * The coded S2K count for rings sealed with a *generated* passphrase
-         * (`GeneratePassword.PROVISIONED_SECRET`, ~157 bits): 0x60 = 64KiB hashed, the RFC 4880
-         * baseline. Stretching adds nothing against that much entropy, while the 0xff maximum
-         * costs seconds per key on a phone — at creation and again at every unlock. Rings whose
-         * passphrase a user *typed* keep the 0xff default ([PgpKeys.createSecretKeyEncryptor]),
-         * and a PGP password change re-seals at 0xff, so a ring whose passphrase stops being
-         * generated stops being cheap.
-         */
-        const val PROVISIONED_RING_S2K_COUNT = 0x60
-    }
-
     fun getPublicKey(filePath: String): Result<PGPPublicKey> {
         return runCatching {
             PgpKeys.readPublicKey(filePath)
@@ -362,63 +338,6 @@ class PgpClient {
         }.onFailure {
             KLogger.e(it) { it.message ?: "failed to decrypt and verify, ${it.message}" }
         }.getOrNull() ?: Outcome.Error("Failed to decrypt and verify", PgpFailure.DecryptAndVerifyFailure)
-    }
-
-    fun createKeyRings(
-        userId: String,
-        password: String,
-        keyDirectory: String,
-        secretKeyRingFilename: String,
-        publicKeyRingFilename: String,
-        algorithm: PGPKeyAlgo = RSA,
-        length: Int = 4096,
-        s2kCount: Int = 0xff,
-    ): Result<Unit> {
-        return runCatching {
-            val folder = File(keyDirectory)
-            if (!folder.exists()) {
-                KLogger.d { "pgp folder dne" }
-                folder.mkdirs()
-            }
-
-            val userFolder = File(keyDirectory, userId)
-            if (!userFolder.exists()) {
-                KLogger.d { "pgp folder dne" }
-                userFolder.mkdirs()
-            }
-
-            val secretRingFile = File(userFolder.path, secretKeyRingFilename)
-            KLogger.d { "secretRing file: $secretRingFile" }
-            if (!secretRingFile.exists()) {
-                KLogger.d { "secretRing file dne" }
-                secretRingFile.createNewFile()
-            }
-
-            val publicRingFile = File(userFolder.path, publicKeyRingFilename)
-            KLogger.d { "public ring file: $publicRingFile" }
-            if (!publicRingFile.exists()) {
-                KLogger.d { "public rin file dne" }
-                publicRingFile.createNewFile()
-            }
-
-            val keyRingGenerator: PGPKeyRingGenerator
-            val generatorMs = measureTimeMillis {
-                keyRingGenerator = PgpKeys.createPgpKeyRingGenerator(userId, algorithm, length, 0, password, s2kCount)
-            }
-            val pgpSecretRing: PGPSecretKeyRing
-            val pgpPublicRing: PGPPublicKeyRing
-            val ringsMs = measureTimeMillis {
-                pgpSecretRing = keyRingGenerator.generateSecretKeyRing()
-                pgpPublicRing = keyRingGenerator.generatePublicKeyRing()
-            }
-            val saveMs = measureTimeMillis {
-                PgpKeys.saveSecretKeyRingToFile(pgpSecretRing, secretRingFile.path)
-                PgpKeys.savePublicKeyRingToFile(pgpPublicRing, publicRingFile.path)
-            }
-            KLogger.d { "createKeyRings: generator=${generatorMs}ms rings=${ringsMs}ms save=${saveMs}ms" }
-        }.onFailure {
-            KLogger.e(it) { it.message ?: "failed to create key rings, ${it.message}" }
-        }
     }
 
     fun getSecretKeyRing(filePath: String, password: String): PGPSecretKeyRing {

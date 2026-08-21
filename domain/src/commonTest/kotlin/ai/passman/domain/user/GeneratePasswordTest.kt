@@ -46,19 +46,6 @@ class GeneratePasswordTest {
     }
 
     @Test
-    fun provisionedSecretShapeIsTypeableAndNeverRepeats() = runTest {
-        val alphabet = GeneratePassword.UPPER + GeneratePassword.LOWER +
-            GeneratePassword.NUM + GeneratePassword.SYMBOLS
-
-        val first = generatePassword(GeneratePassword.PROVISIONED_SECRET)
-        val second = generatePassword(GeneratePassword.PROVISIONED_SECRET)
-
-        assertEquals(24, first.length)
-        assertTrue(first.all { it in alphabet }, "every character must be typeable: $first")
-        assertTrue(first != second, "a repeated 24-char secret means the random source is broken")
-    }
-
-    @Test
     fun aLargeSampleCoversTheWholeAlphabetAndNothingOutsideIt() = runTest {
         // Coverage smoke test, not statistics: at 8192 draws over a 93-character alphabet the
         // chance of any character never appearing is ~e^-88 per character, so a miss means the
