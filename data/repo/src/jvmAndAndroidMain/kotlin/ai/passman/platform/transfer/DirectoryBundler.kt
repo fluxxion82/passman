@@ -4,6 +4,9 @@ import ai.passman.crypto.io.DurableFiles
 import ai.passman.keystore.KeystoreClient
 import java.io.ByteArrayOutputStream
 import java.io.File
+import kotlin.concurrent.withLock
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -188,6 +191,39 @@ object DirectoryBundler {
         excludeBaseNames: Set<String> = emptySet(),
         maxEntries: Int = 1_024,
         maxTotalBytes: Long = 50L * 1024 * 1024,
+    ) = withDestinationLock(destDir) {
+        unbundleLocked(bundleBytes, destDir, excludeBaseNames, maxEntries, maxTotalBytes)
+    }
+
+    /**
+     * Serialises unbundles per destination directory.
+     *
+     * Two unbundles into one directory are reachable: two peers pushing the same artifact at once
+     * (the receive server registers plain Ktor routes and serialises nothing), or a peer's push
+     * overlapping a locally started pull. They would otherwise share one staging directory — its
+     * name is derived from the destination — and the second one's entry-time wipe would delete the
+     * first one's extracted files mid-flight, leaving the first to commit a file the second is
+     * still writing. Renaming a half-written ring over a live one is the exact outcome the staging
+     * directory exists to prevent.
+     *
+     * A plain lock rather than a Mutex because this function is not suspending and every caller is
+     * already on an IO dispatcher doing blocking file work. Keyed on the canonical path so two
+     * File objects naming one directory share a lock; the map holds one entry per artifact
+     * directory per account, which is a handful for the life of the process.
+     */
+    private fun <T> withDestinationLock(destDir: File, body: () -> T): T {
+        val key = runCatching { destDir.canonicalFile.path }.getOrElse { destDir.path }
+        return destinationLocks.computeIfAbsent(key) { ReentrantLock() }.withLock(body)
+    }
+
+    private val destinationLocks = ConcurrentHashMap<String, ReentrantLock>()
+
+    private fun unbundleLocked(
+        bundleBytes: ByteArray,
+        destDir: File,
+        excludeBaseNames: Set<String>,
+        maxEntries: Int,
+        maxTotalBytes: Long,
     ) {
         destDir.mkdirs()
         val destRoot = destDir.canonicalFile.toPath()

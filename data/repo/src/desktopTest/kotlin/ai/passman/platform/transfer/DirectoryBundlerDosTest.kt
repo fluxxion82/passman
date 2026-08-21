@@ -44,6 +44,45 @@ class DirectoryBundlerDosTest {
     }
 
     @Test
+    fun concurrentUnbundlesIntoOneDirectoryDoNotCorruptEachOther() {
+        // Two peers pushing the same artifact at once, or a push overlapping a pull. The staging
+        // directory's name is derived from the destination, so without serialisation the second
+        // unbundle's entry-time wipe deletes the first one's extracted files mid-flight and the
+        // first commits whatever is left — up to renaming a half-written key over a live one.
+        val first = zipOf((0 until 40).map { "first-$it.asc" to ByteArray(2_048) { 1 } })
+        val second = zipOf((0 until 40).map { "second-$it.asc" to ByteArray(2_048) { 2 } })
+
+        val failures = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
+        val start = java.util.concurrent.CountDownLatch(1)
+        val threads = listOf(first, second).map { bundle ->
+            Thread {
+                start.await()
+                runCatching { DirectoryBundler.unbundle(bundle, destDir) }
+                    .onFailure { failures += it }
+            }.apply { start() }
+        }
+        start.countDown()
+        threads.forEach { it.join(30_000) }
+
+        assertTrue(failures.isEmpty(), "unbundle threw under concurrency: ${failures.firstOrNull()}")
+        // Every file from BOTH bundles must be present and whole. Interleaving is fine; loss is not.
+        for (i in 0 until 40) {
+            val a = File(destDir, "first-$i.asc")
+            val b = File(destDir, "second-$i.asc")
+            assertTrue(a.isFile, "first-$i.asc missing")
+            assertTrue(b.isFile, "second-$i.asc missing")
+            assertContentEquals(ByteArray(2_048) { 1 }, a.readBytes(), "first-$i.asc truncated")
+            assertContentEquals(ByteArray(2_048) { 2 }, b.readBytes(), "second-$i.asc truncated")
+        }
+        // And no staging directory survives either run.
+        val siblings = destDir.parentFile.listFiles().orEmpty().map { it.name }
+        assertFalse(
+            siblings.any { it.startsWith(destDir.name) && it != destDir.name },
+            "staging left behind: $siblings",
+        )
+    }
+
+    @Test
     fun aRejectedBundleLeavesNothingBehind() {
         // The caps throw from inside an open output stream, so writing straight to the final paths
         // left earlier entries committed and the current one truncated. A caller that treats the
