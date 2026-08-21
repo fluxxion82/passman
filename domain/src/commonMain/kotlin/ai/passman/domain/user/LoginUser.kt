@@ -4,8 +4,6 @@ import ai.passman.domain.base.Usecase
 import ai.passman.domain.base.invoke
 import ai.passman.domain.base.model.Outcome
 import ai.passman.domain.initialization.models.UserState
-import ai.passman.domain.keystore.EnsureDefaultKeystore
-import ai.passman.domain.pgp.EnsureDefaultPgpRings
 import ai.passman.domain.pgp.ImportDeveloperKey
 import ai.passman.domain.user.models.UserEvent
 import ai.passman.domain.user.persistences.UserEventPersistence
@@ -22,8 +20,6 @@ class LoginUser(
     private val userEventPersistence: UserEventPersistence,
     private val getUserState: GetUserState,
     private val importDeveloperKey: ImportDeveloperKey,
-    private val ensureDefaultKeystore: EnsureDefaultKeystore,
-    private val ensureDefaultPgpRings: EnsureDefaultPgpRings,
 ) : Usecase<LoginUser.LoginRequest, Outcome<UserState>> {
 
     sealed class LoginRequest {
@@ -48,7 +44,6 @@ class LoginUser(
                 userPreferences.upsert(outcome.value)
                 userEventPersistence.update(UserEvent.LoginChanged(outcome.value))
                 importBundledDeveloperKey()
-                ensureAccountDefaults()
 
                 Outcome.Success(getUserState().also { userPreferences.setUserState(it) })
             }
@@ -62,30 +57,13 @@ class LoginUser(
      * never block the login that just succeeded, so the whole attempt is capped by
      * [withTimeoutOrNull] — its own deadline returns null instead of throwing, while an OUTER
      * cancellation still surfaces as a CancellationException and is rethrown, not swallowed.
+     *
+     * Nothing else hangs off a successful login. Keys and keystores are created by the user on the
+     * Create screens; the app provisions no artifacts of its own, so two devices can no longer mint
+     * different files under one name and overwrite each other on the first sync.
      */
     private suspend fun importBundledDeveloperKey() = nonFatal(DEVELOPER_KEY_IMPORT_TIMEOUT) {
         importDeveloperKey(ImportDeveloperKey.Mode.OncePerAccount)
-    }
-
-    /**
-     * Same contract as [importBundledDeveloperKey]: once per account, non-fatal, never allowed to
-     * hold the login result hostage. Each attempt gets its own cap sized to the work it may do —
-     * the common case for both is a preference read that skips in microseconds.
-     *
-     * The caps bound only each use case's cancellable GUARD phase. Once a use case decides to
-     * provision, it commits under NonCancellable and runs to completion — a cancellation landing
-     * between "artifact on disk" and "password recorded in the vault" would otherwise orphan the
-     * artifact forever (the guards would then flag the account settled). So a pathologically slow
-     * keygen means a slow first login, never a destroyed default; the timeout's cancellation
-     * surfaces once the committed sequence finishes.
-     */
-    private suspend fun ensureAccountDefaults() {
-        // Creating the starter keystore runs a JCA RSA keygen — slow enough on a low-end device
-        // to need real headroom over the developer-key import's 5s.
-        nonFatal(DEFAULT_KEYSTORE_TIMEOUT) { ensureDefaultKeystore(Unit) }
-        // Re-provisioning default PGP rings generates a 4096-bit PGP RSA key, the slowest keygen
-        // in the app — worth a still larger cap, and still bounded.
-        nonFatal(DEFAULT_PGP_TIMEOUT) { ensureDefaultPgpRings(EnsureDefaultPgpRings.Request.EnsureProvisioned) }
     }
 
     private suspend fun nonFatal(timeout: Duration, block: suspend () -> Unit) {
@@ -101,7 +79,5 @@ class LoginUser(
     private companion object {
         /** A stalled volume must not hold the login result hostage. */
         val DEVELOPER_KEY_IMPORT_TIMEOUT = 5.seconds
-        val DEFAULT_KEYSTORE_TIMEOUT = 15.seconds
-        val DEFAULT_PGP_TIMEOUT = 30.seconds
     }
 }

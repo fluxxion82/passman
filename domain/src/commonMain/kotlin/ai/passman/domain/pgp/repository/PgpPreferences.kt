@@ -15,15 +15,4 @@ interface PgpPreferences {
      */
     suspend fun isDeveloperKeyImported(userName: String): Boolean
     suspend fun setDeveloperKeyImported(userName: String)
-
-    /**
-     * Whether the default PGP rings (and their vault entry) were already provisioned for
-     * [userName] on this device — see [ai.passman.domain.pgp.EnsureDefaultPgpRings]. Set once
-     * the ring passphrase is safely recorded in the vault, and also when the guard finds the
-     * account already has keys or the entry (legacy accounts, synced artifacts), so a deliberate
-     * key deletion is never undone by the next login. Device-local, like
-     * [isDeveloperKeyImported], and for the same reason.
-     */
-    suspend fun isDefaultRingsProvisioned(userName: String): Boolean
-    suspend fun setDefaultRingsProvisioned(userName: String)
 }

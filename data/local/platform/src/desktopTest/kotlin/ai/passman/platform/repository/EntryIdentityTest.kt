@@ -1055,21 +1055,18 @@ class EntryIdentityTest {
     }
 
     /**
-     * Obligation 7, at the layer that actually decides it.
-     *
-     * `EnsureDefaultKeystore` and `EnsureDefaultPgpRings` guard on
-     * `entries.any { it.entryName in knownEntryNames(...) }` over [listPasswordEntries]. If a
-     * tombstoned row answered that predicate, deleting the starter keystore entry would leave the
-     * guard convinced the account was already provisioned — it would set its once-only flag and
-     * refuse to re-create the artifact, permanently. Nothing in either use case had to change for
-     * this; what makes it true is that the repository hides tombstones from the read they use.
+     * [listPasswordEntries] hides tombstones too, and it is a separate override from
+     * [getPasswordEntries] — the read that surfaces an unreadable vault as an error rather than as
+     * an empty list, so a caller that has to distinguish "no such entry" from "could not look"
+     * gets a truthful answer either way. A tombstoned row answering as present would tell such a
+     * caller an entry still exists that the user deleted.
      */
     @Test
-    fun `a deleted entry is invisible to the provisioning guards' read`() = runBlocking<Unit> {
-        settledVault("alice passman keystore", "gmail")
+    fun `a deleted entry is invisible to the error-reporting read too`() = runBlocking<Unit> {
+        settledVault("acme keystore password", "gmail")
         val repository = repository()
-        val provisioned = repository.getPasswordEntries().first { it.entryName == "alice passman keystore" }
-        assertTrue(repository.deletePasswordEntry(provisioned.uuid))
+        val deleted = repository.getPasswordEntries().first { it.entryName == "acme keystore password" }
+        assertTrue(repository.deletePasswordEntry(deleted.uuid))
 
         val listed = repository.listPasswordEntries()
 
@@ -1077,7 +1074,7 @@ class EntryIdentityTest {
         assertEquals(
             listOf("gmail"),
             listed.value.map { it.entryName },
-            "a tombstoned row must read as absent, or the guard refuses to re-provision a deleted default",
+            "a tombstoned row must read as absent from listPasswordEntries as well",
         )
     }
 

@@ -87,19 +87,21 @@ interface PgpRepository {
     suspend fun deletePgpKey(keyId: Long): Outcome<Unit>
 
     /**
-     * Creates the account's default PGP key rings — the same fixed-name secret/public ring pair
-     * the signup path creates — sealed with [passphrase]. Refuses (without touching anything)
-     * when either default ring file already exists, so it can never overwrite key material that
-     * arrived by sync or import. Used by [ai.passman.domain.pgp.EnsureDefaultPgpRings] to
-     * re-provision an account whose signup-time rings had to be rolled back.
+     * Creates the account's fixed-name default secret/public ring pair, sealed with [passphrase].
+     * Refuses (without touching anything) when either default ring file already exists, so it can
+     * never overwrite key material that arrived by sync or import.
+     *
+     * Nothing calls this on the signup or login path any more — an account is created with no rings
+     * at all, because two devices provisioning under these fixed filenames produced different files
+     * for the first sync to overwrite.
      */
     suspend fun createDefaultKeyRings(passphrase: String): Outcome<Unit>
 
     /**
      * Deletes ONLY the two fixed-name default ring files; every other key file in the account's
-     * pgp directory is untouched. This is rollback plumbing for freshly created default rings
-     * whose passphrase could not be recorded in the vault — a ring nobody holds the passphrase
-     * for is unrecoverable and worse than absent.
+     * pgp directory is untouched. Rollback plumbing for a freshly created default ring pair whose
+     * passphrase could not be recorded — a ring nobody holds the passphrase for is unrecoverable
+     * and worse than absent.
      */
     suspend fun deleteDefaultKeyRings(): Outcome<Unit>
 

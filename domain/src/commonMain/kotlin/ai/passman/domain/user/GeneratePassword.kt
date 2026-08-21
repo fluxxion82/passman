@@ -102,9 +102,11 @@ class GeneratePassword : Usecase<GeneratePassword.PasswordInfo, String> {
         const val NUM = "0123456789"
 
         /**
-         * The shape used for auto-provisioned secrets (starter keystore password, default PGP ring
-         * passphrase): high entropy — 24 characters over a 93-character alphabet is ~157 bits — but
-         * still something a user can read out of their vault and type into an unlock prompt.
+         * The shape used for a machine-generated secret that a human still has to handle: high
+         * entropy — 24 characters over a 93-character alphabet is ~157 bits — but still something
+         * a user can read out of their vault and type into an unlock prompt. Nothing on the
+         * signup or login path mints one any more; it stays as the reference shape (and is what
+         * `PgpClient.PROVISIONED_RING_S2K_COUNT` assumes about a passphrase it is not stretching).
          */
         val PROVISIONED_SECRET = PasswordInfo(
             charSet = setOf(CharSet.UPPERCASE, CharSet.LOWERCASE, CharSet.NUMBER, CharSet.SYMBOLS),

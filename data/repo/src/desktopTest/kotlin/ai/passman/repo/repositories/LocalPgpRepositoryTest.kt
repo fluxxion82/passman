@@ -76,12 +76,6 @@ class LocalPgpRepositoryTest {
         override suspend fun setDeveloperKeyImported(userName: String) {
             developerKeyImportedFor += userName
         }
-        val defaultRingsProvisionedFor = mutableSetOf<String>()
-        override suspend fun isDefaultRingsProvisioned(userName: String): Boolean =
-            userName in defaultRingsProvisionedFor
-        override suspend fun setDefaultRingsProvisioned(userName: String) {
-            defaultRingsProvisionedFor += userName
-        }
     }
 
     private class FakeTransferService : PgpTransferService {

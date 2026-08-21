@@ -543,7 +543,7 @@ private class GatedUserRepository : UserRepository {
         return outcome.await()
     }
 
-    override suspend fun signup(username: String, password: String, pgpPassphrase: String): Outcome<AppUser> = unsupported()
+    override suspend fun signup(username: String, password: String): Outcome<AppUser> = unsupported()
     override suspend fun login(username: String, password: String): Outcome<AppUser> = unsupported()
     override suspend fun bioLogin(username: String): Outcome<AppUser> = unsupported()
     override suspend fun logout() = unsupported()
@@ -576,7 +576,7 @@ private object RecordingUserPreferences : UserPreferences {
 }
 
 private object UnusedUserRepository : UserRepository {
-    override suspend fun signup(username: String, password: String, pgpPassphrase: String): Outcome<AppUser> = unsupported()
+    override suspend fun signup(username: String, password: String): Outcome<AppUser> = unsupported()
     override suspend fun login(username: String, password: String): Outcome<AppUser> = unsupported()
     override suspend fun bioLogin(username: String): Outcome<AppUser> = unsupported()
     override suspend fun changeUserPassword(oldPassword: String, newPassword: String): Outcome<AppUser> =

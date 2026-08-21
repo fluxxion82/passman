@@ -30,9 +30,7 @@ import ai.passman.platform.crypto.JvmSha256Service
 import ai.passman.platform.crypto.SecureRandomService
 import ai.passman.platform.crypto.Sha256Service
 import ai.passman.platform.service.JvmKeystoreLifecycle
-import ai.passman.platform.service.JvmPgpKeyRingService
 import ai.passman.platform.service.KeystoreLifecycle
-import ai.passman.platform.service.PgpKeyRingService
 import ai.passman.platform.storage.JvmPasswordDatabaseStorage
 import ai.passman.platform.storage.PasswordDatabaseStorage
 import ai.passman.platform.recovery.JvmPortableVaultRecovery
@@ -92,7 +90,6 @@ val platformModule = module {
     single<PasswordDatabaseStorage> { JvmPasswordDatabaseStorage(platform = get()) }
     single<KeyringRepository> { KeyringStore(platform = get()) }
     single<KeystoreLifecycle> { JvmKeystoreLifecycle(keystoreClient = get()) }
-    single<PgpKeyRingService> { JvmPgpKeyRingService(pgpClient = get()) }
     single<PasswordTransferService> { JvmPasswordTransferService(client = get()) }
     single<FingerprintService> {
         JvmFingerprintService(
@@ -119,7 +116,6 @@ val platformModule = module {
             coroutinesContextFacade = get(),
             userPreferences = get(),
             keystoreLifecycle = get(),
-            pgpKeyRingService = get(),
             storage = get(),
             passwordHasher = get(),
             secureRandom = get(),

@@ -23,10 +23,9 @@ interface PasswordRepository {
      * Like [getPasswordEntries] but a failed read is an [Outcome.Error]
      * ([ai.passman.domain.password.exception.PasswordFailure.VaultUnreadable]) instead of an
      * empty list. [getPasswordEntries] deliberately flattens an unreadable vault to `emptyList()`
-     * for display; the default-artifact guards ([ai.passman.domain.keystore.EnsureDefaultKeystore],
-     * [ai.passman.domain.pgp.EnsureDefaultPgpRings]) cannot use that answer — provisioning because
-     * a read failed would duplicate artifacts the vault already records. A pure read: never
-     * renumbers, migrates or writes anything.
+     * for display; a caller that acts on the *absence* of an entry cannot use that answer, because
+     * "the vault holds no such row" and "the vault could not be read" would look identical. A pure
+     * read: never renumbers, migrates or writes anything.
      *
      * Default wraps [getPasswordEntries] so in-memory fakes keep working; real implementations
      * override it to surface the failure.

@@ -825,7 +825,7 @@ internal class LocalPgpRepository(
                 val user = userPreferences.getUser() as AppUser.LoggedIn
                 // Occupant guard: PgpClient.createKeyRings overwrites, and a file already under a
                 // default-ring name may be real key material a peer synced over (or an import).
-                // Provisioning must never destroy keys — refuse instead.
+                // Creating a ring must never destroy keys — refuse instead.
                 val occupied = defaultRingFiles(user.userName).filter { it.exists() && it.length() > 0L }
                 if (occupied.isNotEmpty()) {
                     KLogger.e {
@@ -844,8 +844,8 @@ internal class LocalPgpRepository(
                     keyDirectory = pgpDir,
                     secretKeyRingFilename = PgpClient.DEFAULT_SECRET_RING_FILENAME,
                     publicKeyRingFilename = PgpClient.DEFAULT_PUBLIC_RING_FILENAME,
-                    // [passphrase] is always generated (EnsureDefaultPgpRings mints it with
-                    // GeneratePassword.PROVISIONED_SECRET), never user-typed.
+                    // [passphrase] is a generated secret, never user-typed — see
+                    // PgpClient.PROVISIONED_RING_S2K_COUNT for why that changes the S2K cost.
                     s2kCount = PgpClient.PROVISIONED_RING_S2K_COUNT,
                 ).getOrThrow()
                 Outcome.Success(Unit)

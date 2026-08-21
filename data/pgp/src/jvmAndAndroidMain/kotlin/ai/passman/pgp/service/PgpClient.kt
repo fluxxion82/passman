@@ -28,10 +28,10 @@ import org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder
 class PgpClient {
     companion object {
         /**
-         * File names of the account's default key rings — the pair signup creates under
-         * `pgp/<user>/`. Shared here so the signup path (`JvmPgpKeyRingService`) and the
-         * re-provisioning path (`LocalPgpRepository.createDefaultKeyRings`) can never drift onto
-         * different names.
+         * File names of the account's default key rings under `pgp/<user>/`. Nothing creates them
+         * automatically — signup and login provision no artifacts — but
+         * `LocalPgpRepository.createDefaultKeyRings` still writes this pair when asked, and the
+         * names are fixed here so a reader and a writer can never drift apart.
          */
         const val DEFAULT_SECRET_RING_FILENAME = "passman_secret_ring.asc"
         const val DEFAULT_PUBLIC_RING_FILENAME = "passman_public_ring.asc"

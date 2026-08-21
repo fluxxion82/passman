@@ -19,7 +19,6 @@ import ai.passman.platform.repository.FakeBioAuthService
 import ai.passman.platform.repository.LocalUserRepository
 import ai.passman.platform.service.JvmKeystoreLifecycle
 import ai.passman.platform.service.KeystoreLifecycle
-import ai.passman.platform.service.PgpKeyRingService
 import ai.passman.platform.storage.PasswordDatabaseStorage
 import ai.passman.platform.transfer.DirectoryBundler
 import ai.passman.repo.Platform
@@ -105,9 +104,9 @@ private const val IDENTITY_ALIAS = "passmanMain"
  *
  * Everything below the seams is real: a real `JvmKeyStoreClient` writing real PKCS#12 files, a real
  * `PasswordVaultCipher` running real Argon2id, the real `toolsModule` Koin graph the app uses. The
- * fakes are only the things that would otherwise need a device (biometrics), a keyring server (PGP),
- * or a slow second KDF that is not what is under test (the *credential* hasher — the keyring's own
- * Argon2id is real and is the one that matters).
+ * fakes are only the things that would otherwise need a device (biometrics) or a slow second KDF
+ * that is not what is under test (the *credential* hasher — the keyring's own Argon2id is real and
+ * is the one that matters).
  */
 @OptIn(ExperimentalEncodingApi::class)
 class KeyringBootstrapTest {
@@ -119,7 +118,6 @@ class KeyringBootstrapTest {
     private lateinit var hasher: CountingPasswordHasher
     private lateinit var prefs: FakePreferences
     private lateinit var storage: FakeStorage
-    private lateinit var pgp: FakePgpKeyRingService
     private lateinit var bioAuth: FakeBioAuthService
     private lateinit var biometricStore: LocalBiometricUnlockPreferences
     private lateinit var biometricUnlock: BiometricUnlock
@@ -127,7 +125,6 @@ class KeyringBootstrapTest {
     private val user = "alice"
     private val loginPassword = "correct horse battery staple"
     private val newPassword = "a second correct horse"
-    private val ringPassphrase = "a generated ring passphrase, never the login password"
 
     @BeforeTest
     fun setUp() {
@@ -139,7 +136,6 @@ class KeyringBootstrapTest {
         hasher = CountingPasswordHasher()
         prefs = FakePreferences()
         storage = FakeStorage()
-        pgp = FakePgpKeyRingService()
         // The sensor is faked; the enrolment store is the real one over an in-memory Settings, so
         // "did the password change clear the enrolment?" is answered by the same code that answers
         // it on a device.
@@ -200,9 +196,15 @@ class KeyringBootstrapTest {
         )
     }
 
+    /**
+     * The step made to fail is the vault init, which runs after the keyring and the identity store
+     * already exist — the state the rollback exists for. It used to be the PGP ring generation the
+     * signup ran concurrently; signup provisions nothing now, so the vault is the last step that
+     * can fail with artifacts already on disk.
+     */
     @Test
     fun `signup rolls back the keyring and the account directory when a later step fails`() = runBlocking<Unit> {
-        pgp.failing = true
+        storage.failCreate = true
 
         val outcome = signup(repository())
 
@@ -212,7 +214,7 @@ class KeyringBootstrapTest {
         assertFalse(accountDirectory().exists(), "a rolled-back signup must leave no account directory")
 
         // And a retry starts clean rather than inheriting an unopenable store.
-        pgp.failing = false
+        storage.failCreate = false
         assertIs<Outcome.Success<AppUser>>(signup(repository()))
         assertTrue(canOpenStore(derivedStorePassword(loginPassword)))
     }
@@ -223,7 +225,7 @@ class KeyringBootstrapTest {
         val storeBefore = identityStoreFile().readBytes()
         val keyringBefore = keyringFile().readBytes()
 
-        val outcome = repository().signup(user, "a totally different password", "another ring passphrase")
+        val outcome = repository().signup(user, "a totally different password")
 
         assertIs<Outcome.Error>(outcome)
         assertEquals(AuthFailureNames.ACCOUNT_ALREADY_EXISTS, outcome.cause::class.simpleName)
@@ -249,7 +251,7 @@ class KeyringBootstrapTest {
         val derived = derivedStorePassword(loginPassword)
         storage.delete(user)
 
-        val keyringStillThere = repository().signup(user, "a totally different password", "another ring passphrase")
+        val keyringStillThere = repository().signup(user, "a totally different password")
 
         assertIs<Outcome.Error>(keyringStillThere)
         assertEquals(AuthFailureNames.ACCOUNT_ALREADY_EXISTS, keyringStillThere.cause::class.simpleName)
@@ -257,7 +259,7 @@ class KeyringBootstrapTest {
         // And with the keyring gone too, the surviving .pfx alone must still be enough to refuse:
         // recreating the account would leave that store sealed under an RSA identity nothing holds.
         keyringFile().delete()
-        val storeStillThere = repository().signup(user, "a totally different password", "another ring passphrase")
+        val storeStillThere = repository().signup(user, "a totally different password")
 
         assertIs<Outcome.Error>(storeStillThere)
         assertEquals(AuthFailureNames.ACCOUNT_ALREADY_EXISTS, storeStillThere.cause::class.simpleName)
@@ -771,40 +773,6 @@ class KeyringBootstrapTest {
         assertIs<Outcome.Error>(outcome)
         assertTrue(repository.biometricUnlockState(user).enrolled)
         assertIs<Outcome.Success<AppUser>>(repository().bioLogin(user))
-    }
-
-    // --------------------------- pgp ring passphrase decoupling (Task 7)
-
-    @Test
-    fun `signup seals the pgp rings with the provided passphrase, not the login password`() = runBlocking<Unit> {
-        assertIs<Outcome.Success<AppUser>>(signup(repository()))
-
-        val (userId, passphrase) = pgp.createCalls.single()
-        assertEquals(user, userId)
-        assertEquals(ringPassphrase, passphrase)
-        assertNotEquals(loginPassword, passphrase, "a cracked ring file must not yield the vault login")
-    }
-
-    /**
-     * The must-check interaction from the release-polish plan: a master-password change re-wraps
-     * `keyring.pmk` and nothing else, so rings whose passphrase is not the login password cannot
-     * break it. What this proves is service-level, not byte-level: the fake ring service writes no
-     * files, so the assertion is that neither the change nor the following login ever re-invokes
-     * it (the byte-identity of everything under `keystore/<user>/` is covered by "changing the
-     * password rewraps only the keyring"). The change succeeds and the new password logs in with
-     * the rings never revisited.
-     */
-    @Test
-    fun `changing the password never re-invokes the pgp ring service`() = runBlocking<Unit> {
-        val repository = repository()
-        assertIs<Outcome.Success<AppUser>>(signup(repository))
-
-        assertIs<Outcome.Success<AppUser>>(repository.changeUserPassword(loginPassword, newPassword))
-
-        assertEquals(listOf(user to ringPassphrase), pgp.createCalls, "the change must not ask for any ring work")
-        repository.logout()
-        assertIs<Outcome.Success<AppUser>>(repository.login(user, newPassword))
-        assertEquals(1, pgp.createCalls.size, "login must not revisit the ring service either")
     }
 
     /**
@@ -1486,7 +1454,7 @@ class KeyringBootstrapTest {
      * and without that a following login has nothing to verify against.
      */
     private suspend fun signup(repository: LocalUserRepository): Outcome<AppUser> =
-        repository.signup(user, loginPassword, ringPassphrase).also { if (it is Outcome.Success) prefs.upsert(it.value) }
+        repository.signup(user, loginPassword).also { if (it is Outcome.Success) prefs.upsert(it.value) }
 
     /**
      * An account created the way the pre-keyring build created one: a `.pfx` sealed with the login
@@ -1523,7 +1491,6 @@ class KeyringBootstrapTest {
         coroutinesContextFacade = UnconfinedFacade,
         userPreferences = userPreferences,
         keystoreLifecycle = keystoreLifecycle,
-        pgpKeyRingService = pgp,
         storage = storage,
         passwordHasher = hasher,
         secureRandom = JvmSecureRandomService(),
@@ -1832,18 +1799,6 @@ class KeyringBootstrapTest {
         }
     }
 
-    private class FakePgpKeyRingService : PgpKeyRingService {
-        var failing = false
-
-        /** Every (userId, passphrase) handed to the ring service — what the decoupling tests read. */
-        val createCalls = mutableListOf<Pair<String, String>>()
-
-        override suspend fun createKeyRings(userId: String, password: String, keyDirectory: String): Result<Unit> {
-            createCalls += userId to password
-            return if (failing) Result.failure(IllegalStateException("simulated pgp failure")) else Result.success(Unit)
-        }
-    }
-
     private class FakeStorage : PasswordDatabaseStorage {
         private val vaults = mutableMapOf<String, ByteArray>()
         private val preMigration = mutableMapOf<String, ByteArray>()
@@ -1852,7 +1807,11 @@ class KeyringBootstrapTest {
             vaults.remove(username)
         }
         override fun exists(username: String): Boolean = username in vaults
+
+        /** Lets a test fail the vault init — the last signup step that can fail after the .pfx exists. */
+        var failCreate = false
         override fun create(username: String, initialEncryptedBytes: ByteArray) {
+            if (failCreate) throw java.io.IOException("simulated vault init failure")
             vaults[username] = initialEncryptedBytes
         }
         override fun read(username: String): ByteArray = vaults.getValue(username)

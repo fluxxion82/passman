@@ -6,15 +6,13 @@ import ai.passman.domain.user.models.AppUser
 @Suppress("TooManyFunctions")
 interface UserRepository {
     /**
-     * [pgpPassphrase] seals the default PGP key rings created as part of the new account. It is
-     * deliberately NOT the login password: PGP S2K is orders of magnitude cheaper to brute-force
-     * offline than the Argon2id login KDF, and the ring files are designed to leave the device
-     * (sync, share, export) — a cracked ring file must not yield the vault login. The caller
-     * ([ai.passman.domain.user.SignUpUser]) generates it and records it as a vault entry after the
-     * signup succeeds; accounts created before this decoupling keep login-password rings and
-     * migrate through the explicit PGP change-password screen.
+     * Creates the account and nothing else the user did not ask for: the device keyring, the
+     * identity store and an empty vault. No PGP rings, no starter keystore — every device would
+     * mint its own under the same fixed filenames, and the first sync between two of them would
+     * overwrite one device's secret ring with the other's. Keys and keystores are created on the
+     * Create screens, and a second device inherits the first device's by syncing.
      */
-    suspend fun signup(username: String, password: String, pgpPassphrase: String): Outcome<AppUser>
+    suspend fun signup(username: String, password: String): Outcome<AppUser>
     suspend fun login(username: String, password: String): Outcome<AppUser>
 
     /**

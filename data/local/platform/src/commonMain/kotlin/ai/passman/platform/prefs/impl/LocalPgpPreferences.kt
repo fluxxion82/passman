@@ -48,21 +48,9 @@ class LocalPgpPreferences(
 
     private fun developerKeyImportedKey(userName: String) = "$DEVELOPER_KEY_IMPORTED_PREFIX$userName"
 
-    // Same per-account, never-cleared-on-deletion semantics as the developer-key flag above: the
-    // flag is what makes deleting the default rings (or their vault entry) final on this device.
-    override suspend fun isDefaultRingsProvisioned(userName: String): Boolean =
-        settings.getBoolean(defaultRingsProvisionedKey(userName), false)
-
-    override suspend fun setDefaultRingsProvisioned(userName: String) {
-        settings.putBoolean(defaultRingsProvisionedKey(userName), true)
-    }
-
-    private fun defaultRingsProvisionedKey(userName: String) = "$DEFAULT_RINGS_PROVISIONED_PREFIX$userName"
-
     private companion object {
         const val PREFS_NAME = "pgp_prefs"
         const val PGP_LIST = "pgp_keys"
         const val DEVELOPER_KEY_IMPORTED_PREFIX = "developer_key_imported_"
-        const val DEFAULT_RINGS_PROVISIONED_PREFIX = "default_rings_provisioned_"
     }
 }

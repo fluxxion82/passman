@@ -44,7 +44,7 @@ Transfers are whole-artifact — the full password vault, or complete key bundle
 
 Device identity and recovery material is **never** synced, in either direction: `<user>.pfx` (and its `.bak` / `.lock` siblings), `keyring.pmk` / `keyring.pmk.next`, `hybrid.key`, `mldsa.key`, `portable-recovery.pmk` / `.previous`, and `<user>.recovery.p12` / `.crt`. Each device generates its own. The consequence is worth stating plainly: **a second device is not a backup.** It replicates your entries, but not the keys that unlock them on this device — back up the whole `keystore/<user>/` directory yourself.
 
-One expected quirk: the `<profile> passman keystore` and `<profile> passman pgp` entries the app creates when provisioning a profile are per-device, but the keystore file behind them shares one filename. If both devices provisioned before their first sync, the received file overwrites the local one and you will see two identically-named entries with different passwords — the one that opens the surviving file is the keeper; delete the other.
+Because keys and keystores match by filename, give the files you create names you would not pick twice. Two devices that independently create a keystore called `work.pfx` are creating *different* files under one name, and the first sync between them overwrites one with the other — for a PGP secret ring that is key material gone. Nothing is created behind your back to trip over this: a new profile starts with no keys and no keystores, you make what you need on the Create screens, and a second device inherits them by syncing rather than by minting its own.
 
 ### On the wire
 

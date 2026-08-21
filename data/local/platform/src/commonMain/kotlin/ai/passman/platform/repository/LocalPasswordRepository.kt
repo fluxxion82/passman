@@ -242,17 +242,15 @@ class LocalPasswordRepository(
     }
 
     /**
-     * The error-aware read the default-artifact guards use. A pure read on purpose: unlike
-     * [getPasswordEntries] it never renumbers, migrates or writes anything, and an unreadable
-     * vault comes back as [PasswordFailure.VaultUnreadable] instead of the display path's empty
-     * list — the guards must not provision (or set their once-only flags) on an answer that might
-     * merely mean "could not look".
+     * The error-aware read. A pure read on purpose: unlike [getPasswordEntries] it never renumbers,
+     * migrates or writes anything, and an unreadable vault comes back as
+     * [PasswordFailure.VaultUnreadable] instead of the display path's empty list — a caller that
+     * acts on "the vault does not contain X" must not act on an answer that might merely mean
+     * "could not look".
      *
-     * Tombstoned rows are filtered out here, which is what lets `EnsureDefaultKeystore` and
-     * `EnsureDefaultPgpRings` keep their `entries.any { it.entryName in ... }` guards unchanged: a
-     * deleted starter-keystore entry must read as absent, or the guard would refuse to re-create the
-     * artifact and flag the account settled on the strength of a row nobody can see. Being a pure
-     * read it does not reap expired tombstones — it only hides them, which is the same answer.
+     * Tombstoned rows are filtered out here too, so a deleted entry reads as absent rather than as
+     * a row nobody can see. Being a pure read it does not reap expired tombstones — it only hides
+     * them, which is the same answer.
      */
     override suspend fun listPasswordEntries(): Outcome<List<PasswordEntry>> = withContext(coroutinesContextFacade.io) {
         passmanSessionScope(userPreferences.getSessionId()) { scope ->

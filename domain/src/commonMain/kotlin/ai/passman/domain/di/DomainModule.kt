@@ -33,7 +33,6 @@ import ai.passman.domain.keystore.AddKeyStoreEntry
 import ai.passman.domain.keystore.AddKeystoreKey
 import ai.passman.domain.keystore.ClearCryptoKeys
 import ai.passman.domain.keystore.CreateKeyStore
-import ai.passman.domain.keystore.EnsureDefaultKeystore
 import ai.passman.domain.keystore.Decrypt
 import ai.passman.domain.keystore.DeleteKeystore
 import ai.passman.domain.keystore.DeleteKeystoreKey
@@ -74,7 +73,6 @@ import ai.passman.domain.pgp.ExportPgpPrivateKey
 import ai.passman.domain.pgp.GetAllPgpKeys
 import ai.passman.domain.pgp.GetPgpKey
 import ai.passman.domain.pgp.GetPgpPublicKeyPath
-import ai.passman.domain.pgp.EnsureDefaultPgpRings
 import ai.passman.domain.pgp.ImportDeveloperKey
 import ai.passman.domain.pgp.ImportPgpKey
 import ai.passman.domain.pgp.ModifySubKey
@@ -160,18 +158,6 @@ val domainModule = module {
     single { SignWithKey(keystoreRepository = get()) }
     single { ImportKeystore(keystoreRepository = get(), keystoreEventPersistence = get()) }
     single { GetKeystoreKey(keystoreRepository = get()) }
-    single {
-        EnsureDefaultKeystore(
-            keystoreRepository = get(),
-            passwordRepository = get(),
-            keystorePreferences = get(),
-            userPreferences = get(),
-            generatePassword = get(),
-            createKeyStore = get(),
-            deleteKeystore = get(),
-            addPassword = get(),
-        )
-    }
 
     // Password
     single<PasswordEventPersistence> { InMemoryPasswordEventPersistence(contextFacade = get()) }
@@ -210,17 +196,6 @@ val domainModule = module {
     single { ImportPgpKey(pgpRepository = get(), pgpEventPersistence = get()) }
     single { ImportDeveloperKey(pgpRepository = get(), pgpEventPersistence = get()) }
     single { DeletePgpKey(pgpRepository = get(), pgpEventPersistence = get()) }
-    single {
-        EnsureDefaultPgpRings(
-            pgpRepository = get(),
-            pgpPreferences = get(),
-            passwordRepository = get(),
-            userPreferences = get(),
-            generatePassword = get(),
-            addPassword = get(),
-            pgpEventPersistence = get(),
-        )
-    }
 
     // Settings
     single { CopyToClipboard(repository = get()) }
@@ -330,8 +305,6 @@ val domainModule = module {
             getUserState = get(),
             userEventPersistence = get(),
             importDeveloperKey = get(),
-            ensureDefaultKeystore = get(),
-            ensureDefaultPgpRings = get(),
         )
     }
     single { LogoutUser(userPreferences = get(), cryptoPreferences = get(), userRepository = get(), userEvents = get()) }
@@ -342,9 +315,6 @@ val domainModule = module {
             userEventPersistence = get(),
             userPreferences = get(),
             importDeveloperKey = get(),
-            ensureDefaultKeystore = get(),
-            ensureDefaultPgpRings = get(),
-            generatePassword = get(),
         )
     }
     single { UpdateExistingUser(preferences = get(), userEventPersistence = get()) }
