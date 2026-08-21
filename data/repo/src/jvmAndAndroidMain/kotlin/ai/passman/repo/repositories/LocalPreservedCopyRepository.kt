@@ -69,7 +69,13 @@ internal class LocalPreservedCopyRepository(
         // Through the bundler rather than file.delete(), so this takes the same per-destination
         // lock a restore or an inbound sync does. Deleting a copy out from under a restore leaves
         // the artifact path vacated with nothing to install.
-        DirectoryBundler.deletePreserved(file, directory)
+        //
+        // That lock can refuse when the directory is busy, and this method's contract is a Boolean,
+        // so the refusal is reported as `false` — nothing was deleted, which is what `false` means —
+        // rather than thrown at a caller that reports failure by showing a message.
+        runCatching { DirectoryBundler.deletePreserved(file, directory) }
+            .onFailure { KLogger.e(it) { "failed to delete preserved copy" } }
+            .getOrDefault(false)
     }
 
     override suspend fun pathOf(copy: PreservedCopy): String? = withContext(coroutinesContextFacade.io) {

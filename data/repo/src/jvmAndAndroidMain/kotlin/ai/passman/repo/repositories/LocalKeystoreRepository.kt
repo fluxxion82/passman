@@ -283,13 +283,30 @@ class LocalKeystoreRepository(
         }
     }
 
+    // Both deletes report failure as `false` rather than by throwing, and both now go through the
+    // artifact-directory lock, which CAN throw when the directory is busy. Neither caller is prepared
+    // for that: `KeystoreDetailsViewModel.onDeleteKeystoreClicked` calls straight into
+    // `viewModelScope.launch` with no runCatching, so an escaping exception is a crash where the
+    // contract promised a `false` the screen already knows how to show. Translated here rather than
+    // at each caller, since "could not get the lock" means exactly what `false` means: nothing was
+    // deleted, try again.
     override suspend fun deleteKeystore(path: String, name: String, password: String): Boolean = withContext(coroutinesContextFacade.io) {
-        keyStoreClient.deleteKeystore(Keystore(path, name, password))
+        runCatching { keyStoreClient.deleteKeystore(Keystore(path, name, password)) }
+            .getOrElse { failure ->
+                if (failure is CancellationException) throw failure
+                KLogger.e(failure) { "failed to delete keystore $name" }
+                false
+            }
     }
 
     override suspend fun deleteKeystoreKey(path: String, name: String, password: String, keyAlias: String): Boolean =
         withContext(coroutinesContextFacade.io) {
-            keyStoreClient.deleteKeyStoreKey(Keystore(path, name, password), keyAlias)
+            runCatching { keyStoreClient.deleteKeyStoreKey(Keystore(path, name, password), keyAlias) }
+                .getOrElse { failure ->
+                    if (failure is CancellationException) throw failure
+                    KLogger.e(failure) { "failed to delete key $keyAlias from $name" }
+                    false
+                }
         }
 
     private fun unwrapPrivateKey(
