@@ -4,6 +4,7 @@ import ai.passman.crypto.io.DurableFiles
 import ai.passman.keystore.KeystoreClient
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.security.MessageDigest
 import kotlin.concurrent.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantLock
@@ -304,6 +305,7 @@ object DirectoryBundler {
                     val relative = source.relativeTo(staging).path
                     val target = File(destDir, relative)
                     target.parentFile?.mkdirs()
+                    preserveIfDisplaced(target, source)
                     DurableFiles.replace(source, target)
                 }
         } finally {
@@ -317,6 +319,84 @@ object DirectoryBundler {
      * beside one.
      */
     private const val UNBUNDLE_STAGING_SUFFIX = ".unbundle-staging"
+
+    /**
+     * Sibling of the artifact directory holding every version sync has displaced.
+     *
+     * A SIBLING, never a child, and that placement is the whole design. [bundle] walks every
+     * descendant of the directory it is given, so a preserved secret ring stored inside the artifact
+     * directory would be pushed to the peer on the next sync — a local safety copy turned into a
+     * key-material leak. Being outside also puts it beyond the canonical-path confinement in
+     * [unbundle], so no crafted zip entry can reach it, and outside both artifact listings, which
+     * read only the artifact directory. That is why this design needs no filter at any bundle or
+     * unbundle call site and no change to any listing: the location does the work a filter would
+     * have had to do at eight places without ever being missed at one of them.
+     */
+    fun conflictStore(destDir: File): File =
+        File(destDir.parentFile ?: destDir, "${destDir.name}$CONFLICT_STORE_SUFFIX")
+
+    /** Every version sync has displaced for [destDir], newest first. For the recovery UI. */
+    fun preservedCopies(destDir: File): List<File> =
+        conflictStore(destDir).listFiles()
+            .orEmpty()
+            .filter { it.isFile }
+            .sortedByDescending { it.lastModified() }
+
+    /**
+     * Distinct from [UNBUNDLE_STAGING_SUFFIX], which names a directory that is wiped on every
+     * unbundle. This one is never wiped by anything except the user.
+     */
+    private const val CONFLICT_STORE_SUFFIX = ".conflicts"
+
+    /**
+     * Moves [live] into the conflict store if [incoming] would displace different bytes.
+     *
+     * **A rename, never a copy, and that is the entire point.** Copy-then-replace preserves a
+     * snapshot taken at inspection time, which loses any write that lands in between — and writes do
+     * land in between, because push-receive is a background server while key edits are foreground
+     * UI. `addSubKey` and `changeKeyPassword` both rewrite the live path directly, so the sequence
+     * "guard copies the old bytes, user adds a subkey, commit replaces it" destroys a private half
+     * that exists nowhere else, while the copy in the store holds the version *before* the subkey.
+     * Renaming preserves whatever is actually there at the instant it is displaced.
+     *
+     * It also fails in the right direction: if the rename cannot happen — a full disk, which never
+     * pruning makes likelier — this throws, and the caller's commit never replaces anything.
+     *
+     * Names are content-addressed, so re-preserving identical bytes is a no-op and two genuinely
+     * different displaced versions never collide. Not fingerprint-addressed: a fingerprint
+     * identifies a key, not a byte sequence, so two different rings for one key would collide at a
+     * single name and the second would silently overwrite the first — this class of bug again, one
+     * directory along.
+     */
+    internal fun preserveIfDisplaced(live: File, incoming: File) {
+        if (!live.isFile) return
+        if (live.length() == incoming.length() && live.readBytes().contentEquals(incoming.readBytes())) {
+            // Bytes-equal is the common case by far: nearly every file in a bundle is unchanged.
+            // Preserving here would fill the store with copies of things that were never displaced.
+            return
+        }
+
+        val store = conflictStore(live.parentFile).apply { mkdirs() }
+        val preserved = File(store, conflictName(live))
+        if (preserved.exists()) {
+            // Same bytes already preserved under the same name — content addressing makes this
+            // exact, so the live file can simply be dropped rather than stored twice.
+            live.delete()
+            return
+        }
+        DurableFiles.replace(live, preserved)
+    }
+
+    /** `<name>.<digest>.<ext>` — keeps the original name legible while the digest keeps it unique. */
+    private fun conflictName(live: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(live.readBytes())
+            .take(8)
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
+        val base = live.nameWithoutExtension
+        val extension = live.extension
+        return if (extension.isEmpty()) "$base.$digest" else "$base.$digest.$extension"
+    }
 
     class BundleTooLargeException(message: String) : Exception(message)
 }
