@@ -278,6 +278,65 @@ class LocalKeystoreRepositoryTest {
         assertEquals(KeystoreKeyAlgorithm.AES, aesKey.keyAlgorithm)
     }
 
+    /**
+     * A user-added keystore named after the account lands on the **identity store**, unlocked.
+     *
+     * `createKeyStore` appends `.pfx` unless the requested name already ends in it, and
+     * `JvmKeystoreLifecycle` names the identity store `<username>.pfx` in the same directory. So for
+     * the account `alice`, creating a keystore called `alice` resolves to `keystore/alice/alice.pfx`
+     * — the account's RSA identity — and `JvmKeyStoreClient.createKeyStore` publishes it with a
+     * truncating `outputStream()`, taking no `IdentityStoreLock`.
+     *
+     * Two things follow, and the second is why this test lives here rather than in a bug report:
+     *
+     * 1. On its own it destroys the account's identity: the vault's key material is sealed under
+     *    that store and nothing else holds a copy.
+     * 2. For the shared-writer-lock design, it means the artifact-directory lock and
+     *    `IdentityStoreLock` **do not guard disjoint files**, on a plain ASCII username with no
+     *    sync involved at all. Any writer that can be aimed at `<user>.pfx` needs both, in one
+     *    order, or neither guarantee holds.
+     *
+     * Asserted through the repository rather than by recomputing the filename here: the collision is
+     * a property of the app's own name derivation, and a test that spelled `alice.pfx` itself would
+     * only be checking a copy of the rule it is supposed to be testing.
+     */
+    @Test
+    fun createKeyStore_namedAfterTheAccountOverwritesTheIdentityStoreWithoutItsLock() = runBlocking {
+        val identityStore = File(keystoreDir, "alice.pfx")
+        val identityBytes = ByteArray(64) { 0x7F }
+        identityStore.writeBytes(identityBytes)
+        val lockFile = File(keystoreDir, ai.passman.keystore.KeystoreClient.identityStoreLockName("alice.pfx"))
+        check(!lockFile.exists()) { "precondition: no identity-store lock has been taken yet" }
+
+        val outcome = repository.createKeyStore(
+            ai.passman.domain.keystore.CreateKeyStore.CreateRequest(
+                // The account name, not a path and not a filename. Exactly what the UI field takes.
+                keystoreName = "alice",
+                keystorePassword = "collision-password",
+                keyAlgorithm = KeystoreKeyAlgorithm.RSA,
+                keyAlias = "main",
+                aliasPassword = "collision-password",
+                keystoreType = KeyStoreType.PKCS12,
+            ),
+        )
+
+        val info = assertIs<Outcome.Success<ai.passman.domain.keystore.model.KeyStoreInfo>>(outcome).value
+        assertEquals(
+            identityStore.absolutePath,
+            File(info.path, info.name).absolutePath,
+            "a keystore named after the account resolves to the identity store's own path",
+        )
+        assertTrue(
+            !identityStore.readBytes().contentEquals(identityBytes),
+            "the identity store was overwritten by an ordinary user-facing keystore creation",
+        )
+        assertTrue(
+            !lockFile.exists(),
+            "and it was overwritten without IdentityStoreLock ever being taken - the lock file that " +
+                "a commit or a recovery creates, and never deletes, was never created",
+        )
+    }
+
     private suspend fun loadAliases() =
         repository.loadKeystore(keystoreDir.absolutePath, keystoreName).also { check(it != null) }.let {
             assertIs<Outcome.Success<List<ai.passman.domain.keystore.model.KeystoreKey>>>(
