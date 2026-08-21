@@ -145,7 +145,7 @@ class JvmKeystoreLifecycle(private val keystoreClient: KeystoreClient) : Keystor
         return removed
     }
 
-    private fun keystoreFileName(username: String): String = "$username.pfx"
+    private fun keystoreFileName(username: String): String = KeystoreClient.identityStoreName(username)
 
     private fun accountDirectory(username: String, keystoreDir: String): String = "$keystoreDir$username"
 }

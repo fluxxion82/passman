@@ -3,6 +3,7 @@ package ai.passman.repo.repositories
 import ai.passman.crypto.Crypto
 import ai.passman.crypto.CryptoKey
 import ai.passman.domain.connectivity.model.TrustedDevice
+import ai.passman.crypto.io.ArtifactDirectoryLock
 import ai.passman.keystore.KeystoreClient
 import ai.passman.keystore.model.Keystore
 import ai.passman.cache.KeyCacheManager
@@ -55,6 +56,17 @@ class LocalKeystoreRepository(
 
     private val keystoreDir = "${platform.getLocalPath()}${File.separator}keystore${File.separator}"
 
+    /**
+     * Run [block] holding `keystore/<userName>/`'s artifact-directory lock.
+     *
+     * Only the two paths that write the directory without going through [KeystoreClient] need this
+     * — [importKeystoreFile] here, and nothing else. Every other write in this class delegates to
+     * `JvmKeyStoreClient`, which takes the same lock itself, so wrapping again here would only nest
+     * (harmlessly, since the lock is reentrant) and would put the exclusion in two places.
+     */
+    private fun <T> inKeystoreDirectory(userName: String, block: () -> T): T =
+        ArtifactDirectoryLock.withLock(File("$keystoreDir$userName"), block)
+
     override suspend fun createKeyStore(request: CreateKeyStore.CreateRequest): Outcome<KeyStoreInfo> =
         withContext(coroutinesContextFacade.io) {
             val user = userPreferences.getUser() as AppUser.LoggedIn
@@ -65,6 +77,19 @@ class LocalKeystoreRepository(
             // it, and callers compare the two.
             val fileName =
                 if (request.keystoreName.endsWith(".pfx")) request.keystoreName else "${request.keystoreName}.pfx"
+            // A keystore named after the account resolves to `<user>.pfx` — the account's identity
+            // store, which holds the RSA key the vault is sealed under and of which nothing else
+            // holds a copy. `createKeyStore` publishes with a truncating `outputStream()` and takes
+            // no `IdentityStoreLock`, so this was a two-word way for a user to destroy their own
+            // account from an ordinary "new keystore" form. Refused by name, not ordered by lock:
+            // making the overwrite orderly would not make it survivable.
+            if (KeystoreClient.isIdentityStoreName(fileName, user.userName)) {
+                KLogger.e { "refusing to create a keystore at the identity store's own name" }
+                return@withContext Outcome.Error(
+                    "\"${request.keystoreName}\" is reserved for your account's identity; choose another name",
+                    KeystoreFailure.CreateKeystore,
+                )
+            }
             // One client call, one PKCS#12 store(): the key goes in before the file is first
             // written, and a failure anywhere leaves no empty store file behind.
             val result = keyStoreClient.createKeyStore(
@@ -106,10 +131,26 @@ class LocalKeystoreRepository(
             val destinationPath = "$keystoreDir${user.userName}${File.separator}${source.fileName}"
             val destination = Paths.get(destinationPath)
 
-            // The per-user dir otherwise only exists once a keystore has been saved; importing
-            // into a fresh account must not depend on that.
-            destination.parent?.let { Files.createDirectories(it) }
-            Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING)
+            // Import keeps the source's own filename, so a file that happens to be called
+            // `<user>.pfx` lands on the account's identity store and REPLACE_EXISTING destroys it.
+            // Same refusal as createKeyStore, and for the same reason: the identity store is not a
+            // keystore the user may replace by hand.
+            if (KeystoreClient.isIdentityStoreName(source.fileName.toString(), user.userName)) {
+                KLogger.e { "refusing to import over the identity store" }
+                return@runCatching Outcome.Error(
+                    "that file would replace your account's identity; rename it before importing",
+                    KeystoreFailure.CreateKeystore,
+                )
+            }
+
+            // Only the write is locked. Everything above inspected the SOURCE path, which is outside
+            // the artifact directory, so there is no read here to keep atomic with it.
+            inKeystoreDirectory(user.userName) {
+                // The per-user dir otherwise only exists once a keystore has been saved; importing
+                // into a fresh account must not depend on that.
+                destination.parent?.let { Files.createDirectories(it) }
+                Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING)
+            }
 
             Outcome.Success(Unit)
         }.onFailure {

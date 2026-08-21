@@ -124,13 +124,13 @@ object DirectoryBundler {
      * that way — so the writer and the filter cannot drift apart.
      */
     private fun identityStoreBackupName(userName: String): String =
-        KeystoreClient.identityStoreBackupName("$userName.pfx")
+        KeystoreClient.identityStoreBackupName(KeystoreClient.identityStoreName(userName))
 
     private fun identityStoreLockName(userName: String): String =
-        KeystoreClient.identityStoreLockName("$userName.pfx")
+        KeystoreClient.identityStoreLockName(KeystoreClient.identityStoreName(userName))
 
     fun syncExclusions(userName: String): Set<String> = setOf(
-        "$userName.pfx",
+        KeystoreClient.identityStoreName(userName),
         identityStoreBackupName(userName),
         identityStoreLockName(userName),
         HYBRID_KEY_FILE_NAME,
@@ -515,15 +515,35 @@ object DirectoryBundler {
      * Takes the same per-destination lock as [unbundle], so a restore and an inbound push cannot
      * interleave on one directory.
      *
-     * @return false when [preserved] is gone or its recorded path does not resolve inside [destDir].
+     * [excludeBaseNames] is the same set [unbundle] refuses inbound, and it is refused here for a
+     * sharper reason. A copy in the store can only have got there by being displaced, and an excluded
+     * file is never displaced — so a store entry naming one is either hand-placed or crash debris,
+     * and restoring it writes a file the app treats as device identity. The worst of them is the
+     * identity store's own **lock file**: restoring over it renames the locked inode away and installs
+     * a fresh one, after which one process holds a lock on a file nothing else can see and two
+     * commits can publish `<user>.pfx` at once. Exporting such a copy stays allowed; only putting it
+     * back is refused.
+     *
+     * @return false when [preserved] is gone, its recorded path does not resolve inside [destDir], or
+     *   that path names an excluded file.
      */
-    fun restorePreserved(preserved: File, destDir: File): Boolean = withDestinationLock(destDir) {
+    fun restorePreserved(
+        preserved: File,
+        destDir: File,
+        excludeBaseNames: Set<String> = emptySet(),
+    ): Boolean = withDestinationLock(destDir) {
         if (!preserved.isFile) return@withDestinationLock false
 
         // A truncated path names no real destination, so there is nothing honest to restore to.
         if (!hasRecoverablePath(preserved)) return@withDestinationLock false
 
         val relative = originalPathOf(preserved)
+        // Matched exactly as unbundle matches an inbound entry name, so the two cannot disagree about
+        // what "an excluded file" means and let a path in through one door that the other refuses.
+        val resolvedBaseName = File(relative).name.trimEnd('.', ' ').lowercase()
+        if (resolvedBaseName in excludeBaseNames.mapTo(HashSet()) { it.lowercase() }) {
+            return@withDestinationLock false
+        }
         val target = File(destDir, relative)
         // Same confinement unbundle applies to a peer-authored entry name. The path here comes off a
         // filename on disk, which a user can edit, so it gets checked like anything else untrusted.

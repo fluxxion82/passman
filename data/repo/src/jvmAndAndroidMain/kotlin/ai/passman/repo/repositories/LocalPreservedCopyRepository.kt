@@ -57,7 +57,7 @@ internal class LocalPreservedCopyRepository(
         val file = resolveInStore(copy, directory) ?: return@withContext false
         // Where it goes is read back off the file, never from copy.originalName. That field exists to
         // be displayed; trusting it would let whatever populated it choose a write destination.
-        runCatching { DirectoryBundler.restorePreserved(file, directory) }
+        runCatching { DirectoryBundler.restorePreserved(file, directory, DirectoryBundler.syncExclusions(user)) }
             .onFailure { KLogger.e(it) { "failed to restore preserved copy" } }
             .getOrDefault(false)
     }

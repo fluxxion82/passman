@@ -197,5 +197,40 @@ interface KeystoreClient {
 
         /** The lock file guarding [keystoreName]'s commits and recoveries. See [IDENTITY_STORE_LOCK_SUFFIX]. */
         fun identityStoreLockName(keystoreName: String): String = "$keystoreName$IDENTITY_STORE_LOCK_SUFFIX"
+
+        /**
+         * The filename of [userName]'s identity store inside `keystore/<userName>/`.
+         *
+         * The account's RSA identity: the vault's key material is sealed under it and nothing else
+         * holds a copy, so a write that lands on this name and is not an identity-store commit
+         * destroys the account.
+         *
+         * Declared here because three places need to agree on it and, until this was extracted, three
+         * places spelled it out independently — `JvmKeystoreLifecycle`, which creates it;
+         * `DirectoryBundler.syncExclusions`, which must keep it off the wire; and
+         * `LocalKeystoreRepository`, which must refuse to let an ordinary keystore creation or import
+         * land on it. That last one is not hypothetical: creating a keystore named after the account
+         * used to resolve straight onto this file and truncate it, with no lock and no warning.
+         *
+         * Same reasoning as [IDENTITY_STORE_BACKUP_SUFFIX] for the placement — `data:repo` depends on
+         * `data:keystore` and not the other way round.
+         */
+        fun identityStoreName(userName: String): String = "$userName.pfx"
+
+        /**
+         * Whether [keystoreName] would land on [userName]'s identity store.
+         *
+         * Compared case-insensitively because the filesystems this ships on decide that, not the
+         * comparison: on APFS and NTFS `Alice.pfx` and `alice.pfx` are one file, so a check that only
+         * matched the exact spelling would wave through the very write it exists to refuse.
+         *
+         * It is deliberately **not** a resolution-aware check — it cannot be, at this layer. A name
+         * that differs by Unicode normal form still resolves to the same file on those filesystems
+         * and still passes here. That is the same weakness `DirectoryBundler.syncExclusions` has, and
+         * closing it properly means comparing canonical paths rather than names; this guard covers
+         * the case that actually happens, which is a user typing their own account name.
+         */
+        fun isIdentityStoreName(keystoreName: String, userName: String): Boolean =
+            keystoreName.equals(identityStoreName(userName), ignoreCase = true)
     }
 }
