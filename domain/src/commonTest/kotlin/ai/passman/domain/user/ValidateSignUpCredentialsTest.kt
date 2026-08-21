@@ -142,7 +142,7 @@ class ValidateSignUpCredentialsTest {
      * Surrounding whitespace is trimmed, not refused — and that is only safe because the name that
      * gets *stored* is trimmed the same way.
      *
-     * `SignUpUser` persists `param.email.trim()`, and this validator judges `username.trim()`. If
+     * `SignUpUser` persists `param.username.trim()`, and this validator judges `username.trim()`. If
      * those two ever disagreed, a name this accepts as `alice` would be created as `alice `, whose
      * trailing space Windows folds away — the account would resolve onto a different one's paths.
      * The agreement is the load-bearing part; the trimming itself is a convenience.

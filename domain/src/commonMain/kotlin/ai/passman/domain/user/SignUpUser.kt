@@ -31,7 +31,13 @@ class SignUpUser(
      * already exists.
      */
     sealed class SignUpRequest {
-        data class Standard(val email: String, val password: String) : SignUpRequest()
+        /**
+          * `username`, not `email`. The field it carries is labelled **Username** on the sign-up
+          * screen and is used as a **path component** — `keystore/<user>/`, `pgp/<user>/` — and since
+          * the character rule landed it rejects an address outright. The old name outlived whatever
+          * it once described and sent a reviewer looking for a bug that was not there.
+          */
+        data class Standard(val username: String, val password: String) : SignUpRequest()
     }
     override suspend fun invoke(param: SignUpRequest): Outcome<UserState> {
         // Checked here, not only on the sign-up screen. The username is a path component — every
@@ -45,7 +51,7 @@ class SignUpUser(
         // Only the username issues are enforced. Password strength is credential policy and stays the
         // screen's business; this use case refuses what would make the storage layout unsafe, which is
         // the part no caller may opt out of.
-        val username = (param as SignUpRequest.Standard).email.trim()
+        val username = (param as SignUpRequest.Standard).username.trim()
         val usernameIssues = validateSignUpCredentials(username, param.password.trim()).issues
             .filter { it in USERNAME_ISSUES }
         if (usernameIssues.isNotEmpty()) {

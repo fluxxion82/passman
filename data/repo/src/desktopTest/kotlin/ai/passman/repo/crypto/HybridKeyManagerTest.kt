@@ -663,9 +663,26 @@ class HybridKeyManagerTest {
                 "a caller may lose the claim and get null, but must never hold a key the disk does not",
             )
         }
+        // Split in two on purpose. `listFiles()` returns null when the path is not a directory, and
+        // `.orEmpty()` used to collapse that into the same "[]" as a genuinely empty directory — which
+        // is exactly the shape this test failed with once, on 2026-08-21, in a full `projectTest` run
+        // and never since (not in ~10 subsequent full and isolated runs). The message could not say
+        // which of the two had happened, so the cause is still unknown.
+        //
+        // Reading `hybrid.key` two lines above had just succeeded, so the directory existed then. If
+        // this fires again, the first assertion says whether it stopped being a directory rather than
+        // leaving the next person to re-derive that from a bare "[]".
+        val accountDir = keyFile().parentFile
+        val listing = accountDir.listFiles()
+        assertNotNull(
+            listing,
+            "listFiles() returned null for $accountDir (exists=${accountDir.exists()}, " +
+                "isDirectory=${accountDir.isDirectory}) - the account directory stopped being a " +
+                "directory between reading hybrid.key and listing it",
+        )
         assertEquals(
             listOf("hybrid.key", DirectoryBundler.KEYRING_FILE_NAME),
-            keyFile().parentFile.listFiles().orEmpty().map { it.name }.sorted(),
+            listing.map { it.name }.sorted(),
             "no second key file and no publishing temp left behind",
         )
     }

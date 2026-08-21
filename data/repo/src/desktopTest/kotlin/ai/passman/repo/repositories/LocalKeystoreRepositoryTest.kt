@@ -22,7 +22,9 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import org.koin.core.context.startKoin
@@ -182,6 +184,45 @@ class LocalKeystoreRepositoryTest {
         assertTrue(
             repository.getAllKeystores().any { it.name == info.name && it.path == info.path },
             "createKeyStore and getAllKeystores must agree on name and path",
+        )
+    }
+
+    /**
+     * A displaced keystore never appears in the keystore list.
+     *
+     * Free by construction — the conflict store is a *sibling* of the artifact directory and
+     * `getAllKeystores` enumerates only the artifact directory — but "free by construction" is a
+     * claim about code that can be edited, and this was the half of the plan's obligation 5 that had
+     * no assertion behind it. (The PGP half has had one since the recovery layer landed.)
+     *
+     * It would catch a real mistake rather than an imaginary one: a preserved copy's filename is
+     * `<digest><sep><escaped path>`, so a copy of `work.pfx` still *ends* in `.pfx` and would pass the
+     * extension filter the listing uses. Widen the listing to the parent directory and this fires.
+     *
+     * The copy is made by the production displacement path, not planted by hand, so the fixture
+     * cannot drift from what a real displacement produces.
+     */
+    @Test
+    fun getAllKeystores_neverListsAVersionSyncDisplaced() = runBlocking {
+        val displaced = ByteArray(64) { 0x4C }
+        File(keystoreDir, "work.pfx").writeBytes(displaced)
+
+        val preserved = DirectoryBundler.preserveBeforeOverwriting(keystoreDir, "work.pfx")
+        assertNotNull(preserved, "precondition: the displacement must actually have preserved something")
+        assertTrue(
+            preserved.name.endsWith(".pfx"),
+            "precondition: the copy keeps a .pfx extension, so the listing's filter would accept it",
+        )
+
+        val listed = repository.getAllKeystores().map { it.name }
+
+        assertFalse(
+            preserved.name in listed,
+            "a displaced keystore lives in a sibling store and must never appear in the keystore list",
+        )
+        assertTrue(
+            listed.none { it.contains(preserved.name.take(32)) },
+            "nor under any other spelling of the same copy",
         )
     }
 
