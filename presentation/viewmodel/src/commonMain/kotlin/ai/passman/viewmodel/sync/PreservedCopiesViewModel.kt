@@ -9,6 +9,7 @@ import ai.passman.domain.settings.ShareFile
 import ai.passman.domain.settings.model.PreservedCopy
 import ai.passman.domain.settings.model.ShareFileKind
 import ai.passman.domain.settings.model.ShareFileRequest
+import ai.passman.domain.user.VerifyMasterPassword
 import ai.passman.viewmodel.base.BaseViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.channels.Channel
@@ -34,6 +35,7 @@ class PreservedCopiesViewModel(
     private val deletePreservedCopy: DeletePreservedCopy,
     private val getPreservedCopyPath: GetPreservedCopyPath,
     private val shareFile: ShareFile,
+    private val verifyMasterPassword: VerifyMasterPassword,
 ) : BaseViewModel() {
 
     val copies = MutableStateFlow<List<PreservedCopy>>(emptyList())
@@ -48,6 +50,19 @@ class PreservedCopiesViewModel(
 
     /** Export waiting on the user's confirmation dialog; null when none is pending. */
     val pendingShare = MutableStateFlow<ShareFileRequest?>(null)
+
+    /**
+     * The copy whose export is waiting on the master password; null when none is pending.
+     *
+     * Export is re-authenticated because it is the one action here that puts key material somewhere
+     * Passman no longer controls, and the app already refuses to export a live private key without
+     * proof. Without this, a displaced secret ring — quite possibly one under a passphrase the user
+     * rotated because it leaked — would be the cheapest key material in the app to walk off with.
+     */
+    val pendingExportPassword = MutableStateFlow<PreservedCopy?>(null)
+
+    /** Message under the password field after a wrong entry; null while nothing is wrong. */
+    val exportPasswordError = MutableStateFlow<String?>(null)
 
     init {
         reload()
@@ -98,19 +113,37 @@ class PreservedCopiesViewModel(
     }
 
     /**
-     * Resolves the copy's on-disk path and stages the confirmation. Nothing leaves the app here.
+     * Stages the master-password prompt. Nothing is resolved or exported here.
      *
-     * Always [ShareFileKind.DisplacedVersion], which is the kind that claims the least. A preserved
-     * copy may be a secret ring, a public ring, or an entire keystore, and nothing in the store says
-     * which — so the wording must warn without asserting protection the file may not have.
-     *
-     * Refuses to stage while another confirmation is already up. The path resolves on a coroutine,
-     * so without this a tapped Export could raise its dialog on top of a restore or delete the user
-     * is still reading, and confirm a different action than the one they think they are answering.
+     * Refuses while another dialog is up, so a tap can never raise a prompt over a confirmation the
+     * user is still reading and have them answer a question they were not asked.
      */
     fun onExportClicked(copy: PreservedCopy) {
-        if (pendingRestore.value != null || pendingDelete.value != null || pendingShare.value != null) return
+        if (aDialogIsOpen()) return
+        exportPasswordError.value = null
+        pendingExportPassword.value = copy
+    }
+
+    fun onExportPasswordDismissed() {
+        pendingExportPassword.value = null
+        exportPasswordError.value = null
+    }
+
+    /**
+     * Verifies the master password and only then resolves the path and stages the confirmation.
+     *
+     * The path is resolved after the check rather than before, so a wrong password learns nothing —
+     * not even whether the file is still there.
+     */
+    fun onExportPasswordEntered(password: String) {
+        val copy = pendingExportPassword.value ?: return
         viewModelScope.launch {
+            if (!verifyMasterPassword(password)) {
+                exportPasswordError.value = "That is not your master password."
+                return@launch
+            }
+            pendingExportPassword.value = null
+            exportPasswordError.value = null
             val path = getPreservedCopyPath(copy)
             if (path == null) {
                 userMessages.send("Couldn't export ${copy.originalName} — it may already be gone")
@@ -124,6 +157,12 @@ class PreservedCopiesViewModel(
             }
         }
     }
+
+    private fun aDialogIsOpen(): Boolean =
+        pendingRestore.value != null ||
+            pendingDelete.value != null ||
+            pendingShare.value != null ||
+            pendingExportPassword.value != null
 
     fun onShareConfirmed() {
         val request = pendingShare.value ?: return

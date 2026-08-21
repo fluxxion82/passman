@@ -538,6 +538,8 @@ private class GatedUserRepository : UserRepository {
         outcome.complete(result)
     }
 
+    override suspend fun verifyMasterPassword(username: String, password: String): Boolean = false
+
     override suspend fun changeUserPassword(oldPassword: String, newPassword: String): Outcome<AppUser> {
         calls++
         return outcome.await()
@@ -579,6 +581,8 @@ private object UnusedUserRepository : UserRepository {
     override suspend fun signup(username: String, password: String): Outcome<AppUser> = unsupported()
     override suspend fun login(username: String, password: String): Outcome<AppUser> = unsupported()
     override suspend fun bioLogin(username: String): Outcome<AppUser> = unsupported()
+    override suspend fun verifyMasterPassword(username: String, password: String): Boolean = false
+
     override suspend fun changeUserPassword(oldPassword: String, newPassword: String): Outcome<AppUser> =
         unsupported()
 

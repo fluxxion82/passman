@@ -260,6 +260,7 @@ val viewModelModule = module {
             deletePreservedCopy = get(),
             getPreservedCopyPath = get(),
             shareFile = get(),
+            verifyMasterPassword = get(),
         )
     }
 }

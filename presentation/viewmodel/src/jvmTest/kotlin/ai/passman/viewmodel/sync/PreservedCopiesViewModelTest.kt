@@ -8,6 +8,7 @@ import ai.passman.domain.settings.RestorePreservedCopy
 import ai.passman.domain.settings.ShareFile
 import ai.passman.domain.settings.model.PreservedCopy
 import ai.passman.domain.settings.model.ShareFileKind
+import ai.passman.domain.user.VerifyMasterPassword
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -37,6 +38,7 @@ class PreservedCopiesViewModelTest {
     private val deletePreservedCopy: DeletePreservedCopy = mockk(relaxed = true)
     private val getPreservedCopyPath: GetPreservedCopyPath = mockk(relaxed = true)
     private val shareFile: ShareFile = mockk(relaxed = true)
+    private val verifyMasterPassword: VerifyMasterPassword = mockk(relaxed = true)
 
     private val copy = PreservedCopy(
         artifact = SyncOps.PGP,
@@ -61,6 +63,7 @@ class PreservedCopiesViewModelTest {
         deletePreservedCopy = deletePreservedCopy,
         getPreservedCopyPath = getPreservedCopyPath,
         shareFile = shareFile,
+        verifyMasterPassword = verifyMasterPassword,
     )
 
     @Test
@@ -117,31 +120,61 @@ class PreservedCopiesViewModelTest {
     }
 
     @Test
-    fun `export stages the kind that claims the least`() = runTest {
+    fun `export asks for the master password before resolving anything`() = runTest {
+        val viewModel = newVm()
+
+        viewModel.onExportClicked(copy)
+
+        assertEquals(copy, viewModel.pendingExportPassword.value)
+        assertNull(viewModel.pendingShare.value, "nothing is staged until the password is verified")
+        // Not even the path: a wrong password must not learn whether the file is still there.
+        coVerify(exactly = 0) { getPreservedCopyPath.invoke(any()) }
+        coVerify(exactly = 0) { shareFile.invoke(any()) }
+    }
+
+    @Test
+    fun `a wrong master password exports nothing and keeps the prompt up`() = runTest {
+        coEvery { verifyMasterPassword.invoke(any()) } returns false
+        val viewModel = newVm()
+
+        viewModel.onExportClicked(copy)
+        viewModel.onExportPasswordEntered("not-it")
+
+        assertNotNull(viewModel.exportPasswordError.value)
+        assertEquals(copy, viewModel.pendingExportPassword.value, "the prompt stays up to retry")
+        assertNull(viewModel.pendingShare.value)
+        coVerify(exactly = 0) { getPreservedCopyPath.invoke(any()) }
+    }
+
+    @Test
+    fun `the right master password stages the kind that claims the least`() = runTest {
+        coEvery { verifyMasterPassword.invoke("correct-horse") } returns true
         coEvery { getPreservedCopyPath.invoke(copy) } returns "/tmp/store/${copy.id}"
         val viewModel = newVm()
 
         viewModel.onExportClicked(copy)
+        viewModel.onExportPasswordEntered("correct-horse")
 
         val staged = assertNotNull(viewModel.pendingShare.value)
         // Not PrivateKey: that wording promises the file is passphrase-protected, and a displaced
         // copy may be a public ring or a whole keystore. Nothing in the store distinguishes them.
         assertEquals(ShareFileKind.DisplacedVersion, staged.kind)
         assertEquals(copy.originalName, staged.displayName)
+        assertNull(viewModel.pendingExportPassword.value)
+        // Still nothing shared: the password gate is in front of the confirmation, not instead of it.
         coVerify(exactly = 0) { shareFile.invoke(any()) }
     }
 
     @Test
-    fun `export will not raise a dialog over one already open`() = runTest {
-        coEvery { getPreservedCopyPath.invoke(copy) } returns "/tmp/store/${copy.id}"
+    fun `export will not raise a prompt over a dialog already open`() = runTest {
         val viewModel = newVm()
 
         viewModel.onDeleteClicked(copy)
         viewModel.onExportClicked(copy)
 
-        // Otherwise the export dialog lands on top of the delete confirmation the user is reading,
-        // and the button they press answers a question they were never asked.
-        assertNull(viewModel.pendingShare.value)
+        // Otherwise the prompt lands on top of the delete confirmation the user is reading, and the
+        // button they press answers a question they were never asked.
+        assertNull(viewModel.pendingExportPassword.value)
         assertEquals(copy, viewModel.pendingDelete.value)
     }
 }

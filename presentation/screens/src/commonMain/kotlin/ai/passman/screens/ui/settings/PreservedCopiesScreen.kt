@@ -3,6 +3,7 @@ package ai.passman.screens.ui.settings
 import ai.passman.design.core.button.PassmanSecondaryButton
 import ai.passman.design.dialog.ConfirmDeleteDialog
 import ai.passman.design.dialog.ConfirmShareDialog
+import ai.passman.design.dialog.MasterPasswordDialog
 import ai.passman.design.util.formatDateTime
 import ai.passman.domain.settings.model.PreservedCopy
 import ai.passman.viewmodel.sync.PreservedCopiesViewModel
@@ -58,6 +59,8 @@ fun PreservedCopiesScreen(
     val pendingRestore by presenter.pendingRestore.collectAsState()
     val pendingDelete by presenter.pendingDelete.collectAsState()
     val pendingShare by presenter.pendingShare.collectAsState()
+    val pendingExportPassword by presenter.pendingExportPassword.collectAsState()
+    val exportPasswordError by presenter.exportPasswordError.collectAsState()
 
     LaunchedEffect(presenter) {
         presenter.userMessages.receiveAsFlow().collect { message ->
@@ -97,6 +100,17 @@ fun PreservedCopiesScreen(
             onConfirm = presenter::onDeleteConfirmed,
             onDismiss = presenter::onDeleteDismissed,
             confirmLabel = "Delete permanently",
+        )
+    }
+
+    pendingExportPassword?.let { copy ->
+        MasterPasswordDialog(
+            title = "Confirm it's you",
+            message = "Enter your master password to export \"${copy.originalName}\". This file may " +
+                "hold a private key, so it is not handed to another app without checking.",
+            error = exportPasswordError,
+            onConfirm = presenter::onExportPasswordEntered,
+            onDismiss = presenter::onExportPasswordDismissed,
         )
     }
 

@@ -27,5 +27,15 @@ interface UserRepository {
     suspend fun bioLogin(username: String): Outcome<AppUser>
     suspend fun changeUserPassword(oldPassword: String, newPassword: String): Outcome<AppUser>
 
+    /**
+     * Is [password] the account's master password? Checks and nothing else — no session, no
+     * upgrade, no state change.
+     *
+     * For re-authenticating before a sensitive action inside an already-unlocked app. [login] would
+     * work as a check but does far more than check, and reusing it for the question "is this the
+     * right password" would tie a confirmation prompt to session setup.
+     */
+    suspend fun verifyMasterPassword(username: String, password: String): Boolean
+
     suspend fun logout()
 }

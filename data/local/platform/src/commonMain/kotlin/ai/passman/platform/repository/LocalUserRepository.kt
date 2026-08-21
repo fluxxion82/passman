@@ -396,6 +396,13 @@ class LocalUserRepository(
      * wrong-password keystore unlock surfaces as a null Koin instance and an NPE inside
      * `ScopedInstanceFactory`, which is too generic to translate into a useful message.
      */
+    override suspend fun verifyMasterPassword(username: String, password: String): Boolean =
+        withContext(coroutinesContextFacade.io) {
+            // Through the same credential check a login runs, so a re-auth prompt cannot drift from
+            // what actually unlocks the account — including the legacy-KDF handling inside it.
+            verifiedCredentials(username, password) is Outcome.Success
+        }
+
     private suspend fun verifiedCredentials(username: String, password: String): Outcome<Password> {
         val storedCredentials = userPreferences.getStoredCredentials(username)
         if (storedCredentials == null) {

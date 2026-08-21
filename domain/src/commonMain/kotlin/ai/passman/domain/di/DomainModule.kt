@@ -86,6 +86,7 @@ import ai.passman.domain.settings.ClearSyncLog
 import ai.passman.domain.settings.CopyToClipboard
 import ai.passman.domain.settings.GetClipboardExpiry
 import ai.passman.domain.settings.GetPortableVaultAccess
+import ai.passman.domain.user.VerifyMasterPassword
 import ai.passman.domain.settings.GetPreservedCopies
 import ai.passman.domain.settings.RestorePreservedCopy
 import ai.passman.domain.settings.DeletePreservedCopy
@@ -219,6 +220,7 @@ val domainModule = module {
     single { ExecuteReconcileAction(transferRepository = get(), passwordEventPersistence = get()) }
     single { ShareFile(settingsService = get()) }
     single { RecordSyncOutcome(syncLogRepository = get()) }
+    single { VerifyMasterPassword(userRepository = get(), userPreferences = get()) }
     single { GetPreservedCopies(repository = get()) }
     single { RestorePreservedCopy(repository = get()) }
     single { DeletePreservedCopy(repository = get()) }
