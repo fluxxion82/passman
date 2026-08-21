@@ -77,7 +77,7 @@ class DirectoryBundlerDosTest {
         // And no staging directory survives either run.
         val siblings = destDir.parentFile.listFiles().orEmpty().map { it.name }
         assertFalse(
-            siblings.any { it.startsWith(destDir.name) && it != destDir.name },
+            siblings.any { it == "${destDir.name}.unbundle-staging" },
             "staging left behind: $siblings",
         )
     }
@@ -135,7 +135,7 @@ class DirectoryBundlerDosTest {
         // and, worse, be a candidate for the next outbound bundle of the parent.
         val siblings = destDir.parentFile.listFiles().orEmpty().map { it.name }
         assertFalse(
-            siblings.any { it.startsWith(destDir.name) && it != destDir.name },
+            siblings.any { it == "${destDir.name}.unbundle-staging" },
             "no staging directory may remain: $siblings",
         )
         assertContentEquals(ByteArray(8) { 3 }, File(destDir, "a.asc").readBytes())

@@ -244,7 +244,7 @@ object DirectoryBundler {
         // it would make the half-written copies candidates for the next outbound bundle. Sibling
         // also keeps staging on the same filesystem, which is what lets the commit below be an
         // atomic rename rather than a copy.
-        val staging = File(destDir.parentFile ?: destDir, "${destDir.name}$UNBUNDLE_STAGING_SUFFIX")
+        val staging = sibling(destDir, UNBUNDLE_STAGING_SUFFIX)
         staging.deleteRecursively()
         staging.mkdirs()
 
@@ -304,8 +304,13 @@ object DirectoryBundler {
                 .forEach { source ->
                     val relative = source.relativeTo(staging).path
                     val target = File(destDir, relative)
+                    // Unchanged is the common case by far, and skipping BOTH steps is the point:
+                    // rewriting a file with its own bytes still opens a window for a foreground
+                    // write to land and be overwritten, and the preserve would have found nothing
+                    // displaced to save. Nearly every file in every bundle takes this path.
+                    if (isUnchanged(target, source)) return@forEach
                     target.parentFile?.mkdirs()
-                    preserveIfDisplaced(target, source)
+                    preserveDisplaced(target, destDir, relative)
                     DurableFiles.replace(source, target)
                 }
         } finally {
@@ -332,8 +337,22 @@ object DirectoryBundler {
      * unbundle call site and no change to any listing: the location does the work a filter would
      * have had to do at eight places without ever being missed at one of them.
      */
-    fun conflictStore(destDir: File): File =
-        File(destDir.parentFile ?: destDir, "${destDir.name}$CONFLICT_STORE_SUFFIX")
+    fun conflictStore(destDir: File): File = sibling(destDir, CONFLICT_STORE_SUFFIX)
+
+    /**
+     * `<destDir><suffix>`, resolved as a true **sibling** of [destDir].
+     *
+     * Both scratch directories this bundler keeps — staging and the conflict store — must sit
+     * outside the tree being bundled, because [bundle] walks every descendant of its root and would
+     * otherwise ship their contents to a peer. `absoluteFile` first is what makes that hold: a
+     * single-segment relative path has a null parent, and the obvious `?: destDir` fallback then
+     * places the directory *inside* the very tree it must stay out of, failing toward the leak.
+     */
+    private fun sibling(destDir: File, suffix: String): File {
+        val resolved = destDir.absoluteFile
+        val parent = requireNotNull(resolved.parentFile) { "artifact directory has no parent: $destDir" }
+        return File(parent, "${resolved.name}$suffix")
+    }
 
     /** Every version sync has displaced for [destDir], newest first. For the recovery UI. */
     fun preservedCopies(destDir: File): List<File> =
@@ -348,53 +367,62 @@ object DirectoryBundler {
      */
     private const val CONFLICT_STORE_SUFFIX = ".conflicts"
 
-    /**
-     * Moves [live] into the conflict store if [incoming] would displace different bytes.
-     *
-     * **A rename, never a copy, and that is the entire point.** Copy-then-replace preserves a
-     * snapshot taken at inspection time, which loses any write that lands in between — and writes do
-     * land in between, because push-receive is a background server while key edits are foreground
-     * UI. `addSubKey` and `changeKeyPassword` both rewrite the live path directly, so the sequence
-     * "guard copies the old bytes, user adds a subkey, commit replaces it" destroys a private half
-     * that exists nowhere else, while the copy in the store holds the version *before* the subkey.
-     * Renaming preserves whatever is actually there at the instant it is displaced.
-     *
-     * It also fails in the right direction: if the rename cannot happen — a full disk, which never
-     * pruning makes likelier — this throws, and the caller's commit never replaces anything.
-     *
-     * Names are content-addressed, so re-preserving identical bytes is a no-op and two genuinely
-     * different displaced versions never collide. Not fingerprint-addressed: a fingerprint
-     * identifies a key, not a byte sequence, so two different rings for one key would collide at a
-     * single name and the second would silently overwrite the first — this class of bug again, one
-     * directory along.
-     */
-    internal fun preserveIfDisplaced(live: File, incoming: File) {
-        if (!live.isFile) return
-        if (live.length() == incoming.length() && live.readBytes().contentEquals(incoming.readBytes())) {
-            // Bytes-equal is the common case by far: nearly every file in a bundle is unchanged.
-            // Preserving here would fill the store with copies of things that were never displaced.
-            return
-        }
+    /** True when [live] already holds exactly what [incoming] would write. */
+    internal fun isUnchanged(live: File, incoming: File): Boolean =
+        live.isFile &&
+            live.length() == incoming.length() &&
+            live.readBytes().contentEquals(incoming.readBytes())
 
-        val store = conflictStore(live.parentFile).apply { mkdirs() }
-        val preserved = File(store, conflictName(live))
-        if (preserved.exists()) {
-            // Same bytes already preserved under the same name — content addressing makes this
-            // exact, so the live file can simply be dropped rather than stored twice.
+    /**
+     * Moves [live] into [destDir]'s conflict store, where [relative] is its path within the bundle.
+     *
+     * **A rename, never a copy, and that is the design rather than a detail.** Copy-then-replace
+     * preserves a snapshot taken at inspection time, which loses any write landing in between — and
+     * writes do land in between, because push-receive is a background server while key edits are
+     * foreground UI, and both `addSubKey` and `changeKeyPassword` rewrite the live path directly.
+     * Renaming preserves whatever is actually there at the instant it is displaced, and fails in the
+     * right direction: if it cannot happen, this throws and the caller never replaces anything.
+     *
+     * The store is derived from [destDir] — the directory being unbundled, and the value the
+     * per-destination lock is keyed on — never from the live file's own parent. For a nested entry
+     * the latter yields `destDir/sub.conflicts`, a **child** of the bundled tree, which the next
+     * outbound bundle would ship to every peer: a local safety copy turned into a key-material leak.
+     *
+     * Honest about what this does not buy: a foreground writer can still recreate the live path in
+     * the window between this rename and the caller's replace, and that write is then overwritten
+     * unpreserved. Closing it needs a lock shared with every writer, not just with unbundle.
+     */
+    private fun preserveDisplaced(live: File, destDir: File, relative: String) {
+        if (!live.isFile) return
+
+        val store = conflictStore(destDir).apply { mkdirs() }
+        val preserved = File(store, conflictName(live, relative))
+        if (preserved.isFile && preserved.readBytes().contentEquals(live.readBytes())) {
+            // Already preserved, byte for byte. Verified rather than inferred from the name: the
+            // name carries a digest, and treating a name match as a content match would let one
+            // preserved secret ring be destroyed on the strength of a hash collision.
             live.delete()
             return
         }
         DurableFiles.replace(live, preserved)
     }
 
-    /** `<name>.<digest>.<ext>` — keeps the original name legible while the digest keeps it unique. */
-    private fun conflictName(live: File): String {
+    /**
+     * `<path>.<digest>.<ext>` — the original name stays legible while the digest keeps it unique.
+     *
+     * The bundle-relative path is folded in, so `a/x` and `b/x` cannot land on one name in the flat
+     * store. 128 bits of digest, not 64: a collision here means one preserved secret ring silently
+     * replaces another, and the verify above turns that from destruction into a duplicate only if
+     * the bytes really match.
+     */
+    private fun conflictName(live: File, relative: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
             .digest(live.readBytes())
-            .take(8)
+            .take(16)
             .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
-        val base = live.nameWithoutExtension
-        val extension = live.extension
+        val flattened = relative.replace(File.separatorChar, '_').replace('/', '_')
+        val base = flattened.substringBeforeLast('.', flattened)
+        val extension = flattened.substringAfterLast('.', "")
         return if (extension.isEmpty()) "$base.$digest" else "$base.$digest.$extension"
     }
 

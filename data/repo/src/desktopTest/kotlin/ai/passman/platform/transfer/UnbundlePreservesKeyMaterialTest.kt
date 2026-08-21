@@ -158,16 +158,68 @@ class UnbundlePreservesKeyMaterialTest {
     @Test
     fun `preserving moves the live file rather than copying it`() {
         val live = File(destDir, "work_secret_ring.asc").apply { writeBytes(LOCAL) }
-        val incoming = File(root, "staged").apply { writeBytes(INBOUND) }
+        val liveKey = java.nio.file.Files.readAttributes(live.toPath(), java.nio.file.attribute.BasicFileAttributes::class.java).fileKey()
 
-        DirectoryBundler.preserveIfDisplaced(live, incoming)
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to INBOUND), destDir)
 
-        assertFalse(
-            live.exists(),
-            "the live path must be vacated by the preserve; if it still holds bytes, they were " +
-                "copied and a concurrent write to it would be silently discarded by the commit",
+        // The preserved copy is the SAME inode the live file had — it was moved, not copied. A copy
+        // would leave the original bytes at the live path to be overwritten by the commit, which is
+        // how a write landing in between gets silently discarded.
+        val preserved = DirectoryBundler.preservedCopies(destDir).single()
+        val preservedKey = java.nio.file.Files.readAttributes(preserved.toPath(), java.nio.file.attribute.BasicFileAttributes::class.java).fileKey()
+        assertEquals(liveKey, preservedKey, "the displaced file must be moved into the store, not copied")
+    }
+
+    @Test
+    fun `an unchanged file is not rewritten at all`() {
+        val live = File(destDir, "work_secret_ring.asc").apply { writeBytes(LOCAL) }
+        live.setLastModified(1_000_000_000L)
+
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to LOCAL), destDir)
+
+        // Not merely "nothing preserved": nothing WRITTEN. Rewriting a file with its own bytes
+        // reopens the window this whole design closes — a foreground write landing between the
+        // comparison and the replace would be overwritten, and the preserve would have found
+        // nothing displaced to save.
+        assertEquals(1_000_000_000L, live.lastModified(), "an unchanged file must not be rewritten")
+    }
+
+    @Test
+    fun `the digest is taken from the displaced bytes, not the incoming ones`() {
+        // Displace A with X, put B live, then receive X again. If the name were derived from the
+        // INCOMING bytes both preserves would land on one name — and the second would destroy the
+        // first, which is this whole class of bug one directory along.
+        val versionA = ByteArray(80) { 3 }
+        val versionB = ByteArray(80) { 4 }
+        val incoming = ByteArray(80) { 9 }
+
+        File(destDir, "work_secret_ring.asc").writeBytes(versionA)
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to incoming), destDir)
+        File(destDir, "work_secret_ring.asc").writeBytes(versionB)
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to incoming), destDir)
+
+        val preserved = preservedBytes()
+        assertEquals(2, preserved.size, "both displaced versions are somebody's only copy")
+        assertTrue(preserved.any { it.contentEquals(versionA) })
+        assertTrue(preserved.any { it.contentEquals(versionB) })
+    }
+
+    @Test
+    fun `a nested entry preserves outside the bundled tree`() {
+        // The peer authors entry names, so nested paths are reachable. Deriving the store from the
+        // live file's own parent would put it at destDir/sub.conflicts — a CHILD, which the next
+        // outbound bundle ships to every peer.
+        val nested = File(destDir, "sub").apply { mkdirs() }
+        File(nested, "work_secret_ring.asc").writeBytes(LOCAL)
+
+        DirectoryBundler.unbundle(zipOf("sub/work_secret_ring.asc" to INBOUND), destDir)
+
+        assertContentEquals(LOCAL, preservedBytes().single(), "nested preserves must reach the store")
+        assertEquals(
+            setOf("sub/work_secret_ring.asc"),
+            entryNames(DirectoryBundler.bundle(destDir)),
+            "no preserved copy may appear in an outbound bundle",
         )
-        assertContentEquals(LOCAL, preservedBytes().single())
     }
 
     // ---- helpers ---------------------------------------------------------------------------
