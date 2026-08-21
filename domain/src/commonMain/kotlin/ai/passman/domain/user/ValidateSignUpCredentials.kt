@@ -9,6 +9,7 @@ import ai.passman.domain.user.models.PasswordStrength
 class ValidateSignUpCredentials {
     enum class Issue {
         UsernameTooShort,
+        UsernameTooLong,
         UsernameHasIllegalCharacters,
         PasswordTooShort,
         PasswordContainsUsername,
@@ -27,6 +28,7 @@ class ValidateSignUpCredentials {
         val trimmedUsername = username.trim()
         val issues = buildList {
             if (trimmedUsername.length < MIN_USERNAME_LENGTH) add(Issue.UsernameTooShort)
+            if (trimmedUsername.length > MAX_USERNAME_LENGTH) add(Issue.UsernameTooLong)
             if (trimmedUsername.length >= MIN_USERNAME_LENGTH && !isUsableAsAFileName(trimmedUsername)) {
                 add(Issue.UsernameHasIllegalCharacters)
             }
@@ -41,7 +43,8 @@ class ValidateSignUpCredentials {
                 add(Issue.PasswordSingleCharacter)
             }
         }
-        val passwordIssues = issues - Issue.UsernameTooShort - Issue.UsernameHasIllegalCharacters
+        val passwordIssues =
+            issues - Issue.UsernameTooShort - Issue.UsernameTooLong - Issue.UsernameHasIllegalCharacters
         val strength = if (passwordIssues.isNotEmpty()) PasswordStrength.Weak else scoreStrength(password)
         return Result(issues, strength)
     }
@@ -81,8 +84,24 @@ class ValidateSignUpCredentials {
      *
      * First and last characters are alphanumeric; `.`, `_` and `-` are allowed between them. That
      * rules out every separator, `.`/`..`, leading dots, and the trailing dots and spaces Windows
-     * folds away — and, because it excludes `<>:"|?*` and control characters along with everything
-     * else not listed, the Windows-reserved set as well.
+     * folds away, along with `<>:"|?*` and control characters — every character Windows reserves.
+     *
+     * Reserved *device names* are a separate rule, because they are made of perfectly ordinary
+     * characters. `con`, `nul`, `aux`, `prn`, `com1`…`com9`, `lpt1`…`lpt9` are not filenames on
+     * Windows at any path, with or without an extension — `con.txt` is still `con` — and the desktop
+     * app ships an MSI. Without this a user could sign up as `con`, pass validation, and have the
+     * account bootstrap die creating `keystore\con\` with a generic failure after the validator
+     * said the name was fine. An earlier version of this KDoc claimed the character rule covered
+     * these; it does not, and could not.
+     *
+     * Length is capped for the same reason the character set is: the account name is a path
+     * component, and the longest thing appended to it is `.unbundle-staging` (17 characters), against
+     * a 255-byte limit on every filesystem this ships to. A name near that limit degrades silently
+     * rather than loudly — `<user>.lock` stops being creatable and `ArtifactDirectoryLock` falls back
+     * to in-process exclusion with a warning, quietly dropping the cross-process guarantee for that
+     * account, while `<user>.unbundle-staging` stops being creatable and every inbound push is
+     * rejected forever with nothing in the app to explain it. [MAX_USERNAME_LENGTH] leaves a wide
+     * margin under the binding constraint rather than sitting near it.
      *
      * Existing accounts are untouched: this runs only when one is created. An account already named
      * something dangerous keeps working exactly as badly as it did before.
@@ -92,7 +111,10 @@ class ValidateSignUpCredentials {
         if (username.any { it !in ALPHANUMERIC && it !in INNER_PUNCTUATION }) return false
         // The suffixes that name a sibling of an account directory. A username ending in one would
         // claim a path the app already uses for something that is not an account.
-        return RESERVED_SUFFIXES.none { username.endsWith(it, ignoreCase = true) }
+        if (RESERVED_SUFFIXES.any { username.endsWith(it, ignoreCase = true) }) return false
+        // Windows device names, matched on the stem: `con.txt` is `con` there, not a file called
+        // "con.txt".
+        return username.substringBefore('.').lowercase() !in RESERVED_DEVICE_NAMES
     }
 
     private fun scoreStrength(password: String): PasswordStrength {
@@ -131,7 +153,25 @@ class ValidateSignUpCredentials {
          */
         private val RESERVED_SUFFIXES = listOf(".conflicts", ".unbundle-staging", ".lock")
 
+        /**
+         * Names Windows refuses at any path, extension or not. Lowercase; the check folds case.
+         *
+         * Not a filesystem concern on Android or macOS, but the account directory this names is
+         * created on whichever platform the user signed up on, and the desktop app ships an MSI.
+         */
+        private val RESERVED_DEVICE_NAMES =
+            setOf("con", "prn", "aux", "nul") +
+                (0..9).map { "com$it" } +
+                (0..9).map { "lpt$it" }
+
         const val MIN_USERNAME_LENGTH = 3
+
+        /**
+         * Well under the binding constraint rather than at it: the filesystem limit is 255 bytes per
+         * name component, the longest suffix appended to a username is `.unbundle-staging` at 17, and
+         * an account key has no reason to be long.
+         */
+        const val MAX_USERNAME_LENGTH = 64
         const val MIN_PASSWORD_LENGTH = 12
     }
 }

@@ -189,11 +189,14 @@ open class SignUpViewModel(
     private fun ValidateSignUpCredentials.Issue.message(): String = when (this) {
         ValidateSignUpCredentials.Issue.UsernameTooShort ->
             "Username must be at least ${ValidateSignUpCredentials.MIN_USERNAME_LENGTH} characters"
-        // Says what is allowed rather than what was wrong: the rejected input is a path fragment or a
-        // non-ASCII letter, and explaining why either is unsafe would mean explaining the storage
-        // layout to someone filling in a sign-up form.
+        ValidateSignUpCredentials.Issue.UsernameTooLong ->
+            "Username must be at most ${ValidateSignUpCredentials.MAX_USERNAME_LENGTH} characters"
+        // Says what is allowed rather than what was wrong: the rejected input is a path fragment, a
+        // reserved device name or a non-ASCII letter, and explaining why any of those is unsafe would
+        // mean explaining the storage layout to someone filling in a sign-up form. "A-Z" rather than
+        // "letters" because the rule really is ASCII — é and 李 are letters and are refused.
         ValidateSignUpCredentials.Issue.UsernameHasIllegalCharacters ->
-            "Username can use letters, numbers, and . _ - between them"
+            "Username can use A-Z, 0-9, and . _ - between them"
         ValidateSignUpCredentials.Issue.PasswordTooShort ->
             "Master password must be at least ${ValidateSignUpCredentials.MIN_PASSWORD_LENGTH} characters"
         ValidateSignUpCredentials.Issue.PasswordContainsUsername ->
