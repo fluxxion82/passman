@@ -171,10 +171,21 @@ object DirectoryBundler {
 
     private fun bundleLocked(sourceDir: File, excludeBaseNames: Set<String>): ByteArray {
         require(sourceDir.isDirectory) { "not a directory: $sourceDir" }
+        // Both checks, and the union is deliberate. The resolved comparison is the stronger one and
+        // catches everything a name comparison cannot; the name comparison is kept because dropping
+        // it could only ever *weaken* the filter on a platform where canonicalisation does not fold
+        // the way that platform's filesystem does. Refusing a file twice costs nothing; shipping a
+        // private key once is unrecoverable.
+        val excludedPaths = excludedPathsIn(sourceDir, excludeBaseNames)
         val out = ByteArrayOutputStream()
         ZipOutputStream(out).use { zip ->
             sourceDir.walkTopDown()
-                .filter { it.isFile && it.name !in excludeBaseNames && !it.name.endsWith(TEMP_FILE_SUFFIX) }
+                .filter {
+                    it.isFile &&
+                        it.name !in excludeBaseNames &&
+                        resolvedPathOf(it) !in excludedPaths &&
+                        !it.name.endsWith(TEMP_FILE_SUFFIX)
+                }
                 .forEach { file ->
                     val entryName = file.relativeTo(sourceDir).invariantSeparatorsPath
                     zip.putNextEntry(ZipEntry(entryName))
@@ -253,6 +264,7 @@ object DirectoryBundler {
         destDir.mkdirs()
         val destRoot = destDir.canonicalFile.toPath()
         val excludedResolvedNames = excludeBaseNames.mapTo(HashSet()) { it.lowercase() }
+        val excludedPaths = excludedPathsIn(destDir, excludeBaseNames)
         var entries = 0
         var total = 0L
 
@@ -282,8 +294,11 @@ object DirectoryBundler {
                 val safeRelative = entry.name.replace('\\', '/')
                 // The name the destination filesystem would resolve the entry to — see the KDoc.
                 val resolvedBaseName = File(safeRelative).name.trimEnd('.', ' ').lowercase()
+                // Resolved as well as named — see excludedPathsIn. `..` is rejected before the path
+                // is built, so nothing below can be asked to resolve outside destDir.
                 if (safeRelative.contains("..") ||
                     resolvedBaseName in excludedResolvedNames ||
+                    resolvedPathOf(File(destDir, safeRelative)) in excludedPaths ||
                     resolvedBaseName.endsWith(TEMP_FILE_SUFFIX)
                 ) {
                     entry = zip.nextEntry
@@ -377,6 +392,31 @@ object DirectoryBundler {
         val parent = requireNotNull(resolved.parentFile) { "artifact directory has no parent: $destDir" }
         return File(parent, "${resolved.name}$suffix")
     }
+
+    /**
+     * The excluded names of [directory], resolved to the paths they actually denote.
+     *
+     * The exclusion set is a set of **names**, but which file a name denotes is decided by the
+     * **filesystem**, and the two disagree more often than a name-based check can see:
+     * `ALICE.pfx` and a decomposed spelling of an accented name are the same file as their
+     * counterparts on APFS and NTFS; a username carrying a separator makes the exclusion string
+     * `team/a.pfx` while the file's basename is `a.pfx`; Windows folds `alice.pfx.` onto
+     * `alice.pfx`. Every one of those was a way for the identity store or a recovery key to be
+     * bundled outbound or accepted inbound, and `IdentityStoreDisplaceableTest` demonstrates three
+     * of them.
+     *
+     * Resolving both sides and comparing paths delegates the question to the thing that answers it.
+     * It works for a file that does not exist yet too: two spellings of an absent path normalise to
+     * the same string, so a peer's `<user>.pfx` is refused on a device that has none.
+     *
+     * Computed once per call, never per file — canonicalisation is a syscall.
+     */
+    private fun excludedPathsIn(directory: File, excludeBaseNames: Set<String>): Set<String> =
+        excludeBaseNames.mapTo(HashSet()) { resolvedPathOf(File(directory, it)) }
+
+    /** Absolute is the fallback, never the raw path: a relative one resolves against the CWD. */
+    private fun resolvedPathOf(file: File): String =
+        runCatching { file.canonicalPath }.getOrElse { file.absolutePath }
 
     /** Every version sync has displaced for [destDir], newest first. For the recovery UI. */
     fun preservedCopies(destDir: File): List<File> =
@@ -584,6 +624,7 @@ object DirectoryBundler {
         // what "an excluded file" means and let a path in through one door that the other refuses.
         val resolvedBaseName = File(relative).name.trimEnd('.', ' ').lowercase()
         if (resolvedBaseName in excludeBaseNames.mapTo(HashSet()) { it.lowercase() } ||
+            resolvedPathOf(File(destDir, relative)) in excludedPathsIn(destDir, excludeBaseNames) ||
             resolvedBaseName.endsWith(TEMP_FILE_SUFFIX)
         ) {
             return@withDestinationLock false
