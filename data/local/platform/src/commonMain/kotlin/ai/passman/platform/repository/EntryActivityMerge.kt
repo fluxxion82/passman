@@ -63,14 +63,40 @@ internal const val MAX_ACTIVITY = 20
  * non-determinism this sort exists to remove.
  *
  * Unlike `.distinct()` above, this comparator does *not* pick up a new field automatically: a fourth
- * field added to [EntryActivity] later must be added to `compareBy` by hand, or two records differing
- * only in that field tie under the old tuple, the order stops being total again, and idempotence and
- * commutativity break silently, again exactly at the cap boundary.
+ * field added to [EntryActivity] later must be added to [ACTIVITY_ORDER] by hand, or two records
+ * differing only in that field tie under the old tuple, the order stops being total again, and
+ * idempotence and commutativity break silently, again exactly at the cap boundary.
+ *
+ * ## Why an [EntryActivity.KIND_DELETED] record is exempt from eviction
+ *
+ * A deletion record *is* the tombstone — the row is hidden from every read because it carries one,
+ * and for no other reason. Let the cap evict it and a busy entry (twenty edits is not a lot for a
+ * password that gets rotated) silently comes back to life on the next merge, which is the failure
+ * this whole mechanism exists to prevent and is strictly worse than losing a line of history.
+ *
+ * So deletion records are taken first and ordinary ones fill whatever room is left. The cap still
+ * holds at [MAX_ACTIVITY] in total rather than becoming "twenty *plus* the tombstones": deletion
+ * records are themselves capped, so a corrupt or hostile vault carrying thousands of them cannot use
+ * the exemption to grow an entry without bound, and keeping the newest twenty of them still leaves
+ * the row unmistakably tombstoned.
+ *
+ * The result stays a pure function of the *set* of records under a total order — the property the
+ * comparator above exists to buy — so commutativity and idempotence survive the exemption: merging
+ * `b` back into `mergeActivity(a, b)` re-offers only records that were already considered and lost,
+ * and they lose again by the same comparison.
  */
-internal fun mergeActivity(a: List<EntryActivity>, b: List<EntryActivity>): List<EntryActivity> =
-    (a + b).distinct()
-        .sortedWith(compareBy({ it.at }, { it.kind }, { it.device }))
-        .takeLast(MAX_ACTIVITY)
+internal fun mergeActivity(a: List<EntryActivity>, b: List<EntryActivity>): List<EntryActivity> {
+    val all = (a + b).distinct().sortedWith(ACTIVITY_ORDER)
+    val deletions = all.filter { it.kind == EntryActivity.KIND_DELETED }
+    if (deletions.isEmpty()) return all.takeLast(MAX_ACTIVITY)
+    val keptDeletions = deletions.takeLast(MAX_ACTIVITY)
+    val room = MAX_ACTIVITY - keptDeletions.size
+    val keptRest = all.filterNot { it.kind == EntryActivity.KIND_DELETED }.takeLast(room)
+    return (keptDeletions + keptRest).sortedWith(ACTIVITY_ORDER)
+}
+
+/** The total order [mergeActivity] both sorts and evicts by. See its KDoc for why it is total. */
+private val ACTIVITY_ORDER = compareBy<EntryActivity>({ it.at }, { it.kind }, { it.device })
 
 /**
  * The earlier of two [ai.passman.domain.password.model.PasswordEntry.createdAt] values, treating `0`

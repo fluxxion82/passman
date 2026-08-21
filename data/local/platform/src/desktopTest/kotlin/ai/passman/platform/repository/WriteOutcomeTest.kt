@@ -162,13 +162,23 @@ class WriteOutcomeTest {
         assertEquals("pw-meadow", storedEntries().single().password, "the failed write must change nothing")
     }
 
+    /**
+     * The row is stamped, not dropped — a hard delete leaves a vault byte-indistinguishable from one
+     * the entry never existed in, so the next sync with a peer that still holds it puts it back. What
+     * the caller sees is unchanged: the delete reports true and the entry is gone from every read.
+     */
     @Test
     fun `a delete that removes its target reports true`() = runBlocking<Unit> {
         vault(entry("meadow", id = "1"), entry("stable", id = "2"))
         val target = repository().getPasswordEntries().first { it.entryName == "meadow" }
 
         assertTrue(repository().deletePasswordEntry(target.uuid))
-        assertEquals(listOf("stable"), storedEntries().map { it.entryName })
+        assertEquals(listOf("stable"), repository().getPasswordEntries().map { it.entryName })
+        assertEquals(
+            listOf("meadow"),
+            storedEntries().filter { it.isTombstoned }.map { it.entryName },
+            "the deleted row stays in the vault as a tombstone, or the deletion never reaches a peer",
+        )
     }
 
     @Test

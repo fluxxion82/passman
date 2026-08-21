@@ -12,6 +12,7 @@ import ai.passman.domain.settings.exception.TransferFailure
 import ai.passman.domain.settings.model.ReconcileAction
 import ai.passman.domain.user.models.AppUser
 import ai.passman.domain.user.repository.UserPreferences
+import kotlin.time.Clock
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.encodeToString
 import java.io.File
@@ -79,32 +80,29 @@ internal class VaultReconciler(
                                 // this is the same merge it has always been, and it stops being the
                                 // same one only for entries created after the upgrade.
                                 //
-                                // activity/createdAt are unioned in *both* arms below, not only when
-                                // the staged row wins on dateCreated - see mergeActivity's KDoc and
-                                // LocalPasswordRepository.mergePasswordEntries's KDoc for why a
-                                // winner-arm-only union is broken: it drops the losing side's activity
-                                // and createdAt permanently instead of converging on the next sync.
+                                // The pairwise decision is mergeEntry, shared with that method rather
+                                // than spelled out again here. This is the second of the two merge
+                                // sites, and every rule that has to hold whichever copy wins - the
+                                // tombstone check, the activity union, the createdAt minimum - is a
+                                // rule that used to have to be written into both arms of both sites
+                                // by hand, where an else arm that does nothing looks perfectly
+                                // correct. See mergeEntry's KDoc.
                                 val byUuid = curEntries.associateBy { it.uuid }.toMutableMap()
                                 for (pass in newEntries) {
                                     val existingEntry = byUuid[pass.uuid]
-                                    byUuid[pass.uuid] = when {
-                                        existingEntry == null -> pass
-                                        pass.dateCreated > existingEntry.dateCreated -> pass.copy(
-                                            activity = mergeActivity(existingEntry.activity, pass.activity),
-                                            createdAt = minNonZero(existingEntry.createdAt, pass.createdAt),
-                                        )
-                                        else -> existingEntry.copy(
-                                            activity = mergeActivity(existingEntry.activity, pass.activity),
-                                            createdAt = minNonZero(existingEntry.createdAt, pass.createdAt),
-                                        )
-                                    }
+                                    byUuid[pass.uuid] = if (existingEntry == null) pass else mergeEntry(existingEntry, pass)
                                 }
-                                byUuid.values.sortedBy { it.entryName.lowercase() }
-                                    .mapIndexed { index, entry -> entry.copy(id = (index + 1).toString()) }
+                                byUuid.values.toList()
+                                    .withoutExpiredTombstones(Clock.System.now().toEpochMilliseconds())
+                                    .sortedBy { it.entryName.lowercase() }
+                                    .withDisplayOrdinals()
                             } else {
-                                // Overwrite: the staged rows verbatim, local activity and all. That is
-                                // inherent to what Overwrite means - "take theirs" - not a gap this
-                                // schema step missed; there is no local row left to union against.
+                                // Overwrite: the staged rows verbatim, local activity and all - and
+                                // the peer's tombstones with them, because "take theirs" includes
+                                // their deletions. That is inherent to what Overwrite means, not a
+                                // gap this schema step missed; there is no local row left to union
+                                // against. Expiry is left to the next read, which reaps on a path
+                                // that already writes.
                                 entryIdentity.stabilize(VaultJson.decodeFromString<List<PasswordEntry>>(newJsonString))
                             }
 

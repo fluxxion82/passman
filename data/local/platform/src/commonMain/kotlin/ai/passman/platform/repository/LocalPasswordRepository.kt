@@ -112,6 +112,20 @@ private const val PUBLISH_ATTEMPTS = 3
  * So the lambdas resolve an *index* and rewrite or drop that one position. Which of two
  * indistinguishable rows is chosen is arbitrary, but it is the same choice `GetPassword` makes when
  * it looks one up, and one row surviving is recoverable where none surviving is not.
+ *
+ * ## A deleted row stays in the vault
+ *
+ * A delete stamps the row with an [EntryActivity.KIND_DELETED] record instead of removing it (see
+ * [tombstoned]). It has to: a dropped row leaves a vault byte-indistinguishable from one the entry
+ * never existed in, and both merge sites are a union keyed on uuid with no arm that can *remove* one,
+ * so the next sync with a peer that still holds the row reads it as new and adds it straight back.
+ *
+ * The consequence for everything else in this class is that the entry list it works on is not the
+ * entry list its callers see. [parseEntries] and every mutation lambda deal in the stored rows,
+ * tombstones included — that is what keeps a deletion alive across a save. Only the two read methods
+ * ([getPasswordEntries], [listPasswordEntries]) filter, and they filter on the way *out*, after the
+ * write. Filtering earlier would be the same bug in a new place: a mutation that re-published a list
+ * with the tombstones already dropped would resurrect every entry the user had ever deleted.
  */
 class LocalPasswordRepository(
     private val userPreferences: UserPreferences,
@@ -189,23 +203,31 @@ class LocalPasswordRepository(
                     return@passmanSessionScope emptyList()
                 }
 
-                val sorted = entries.sortedBy { it.entryName.lowercase() }
-                val renumbered = sorted.mapIndexed { index, e -> e.copy(id = (index + 1).toString()) }
+                // The one path that is guaranteed to run and to write, so it is where a tombstone
+                // that has outlived its window is actually reaped — dropping it in `parseEntries`
+                // instead would hide the row from this list while leaving it on disk forever,
+                // because the comparison below would then never see a difference to publish.
+                val unexpired = entries.withoutExpiredTombstones(Clock.System.now().toEpochMilliseconds())
+                val sorted = unexpired.sortedBy { it.entryName.lowercase() }
+                val renumbered = sorted.withDisplayOrdinals()
                 // What the caller gets when the renumbering does not reach the disk: display order,
                 // but the ordinals that are actually stored. Handing back numbers no vault holds
                 // would only be safe while nothing addresses an entry by them, and the whole reason
                 // this class moved to uuids is that something did.
-                latest = sorted
+                latest = sorted.live()
                 // Persist the renumbering only when it actually changed, so a plain
                 // read isn't a write. Storage writes are atomic (see JvmPasswordDatabaseStorage),
-                // so this can no longer truncate the vault on a crash.
+                // so this can no longer truncate the vault on a crash. Compared against the list as
+                // parsed, tombstones included: an expiry that removed a row is a change worth
+                // publishing even when nothing was renumbered.
                 if (renumbered == entries) {
                     migrateVault(scope, user.userName, vault)
-                    return@passmanSessionScope renumbered
+                    return@passmanSessionScope renumbered.live()
                 }
+                // The tombstoned rows go to disk and only the live ones come back to the caller.
                 when (writeEntries(scope, user.userName, renumbered, vault)) {
-                    Publish.Published -> return@passmanSessionScope renumbered
-                    Publish.Failed -> return@passmanSessionScope sorted
+                    Publish.Published -> return@passmanSessionScope renumbered.live()
+                    Publish.Failed -> return@passmanSessionScope sorted.live()
                     // Somebody published between this read and this write, so the list just
                     // renumbered is already stale. Read the newer vault and renumber that instead —
                     // returning the stale list would show the user entries that no longer exist.
@@ -225,6 +247,12 @@ class LocalPasswordRepository(
      * vault comes back as [PasswordFailure.VaultUnreadable] instead of the display path's empty
      * list — the guards must not provision (or set their once-only flags) on an answer that might
      * merely mean "could not look".
+     *
+     * Tombstoned rows are filtered out here, which is what lets `EnsureDefaultKeystore` and
+     * `EnsureDefaultPgpRings` keep their `entries.any { it.entryName in ... }` guards unchanged: a
+     * deleted starter-keystore entry must read as absent, or the guard would refuse to re-create the
+     * artifact and flag the account settled on the strength of a row nobody can see. Being a pure
+     * read it does not reap expired tombstones — it only hides them, which is the same answer.
      */
     override suspend fun listPasswordEntries(): Outcome<List<PasswordEntry>> = withContext(coroutinesContextFacade.io) {
         passmanSessionScope(userPreferences.getSessionId()) { scope ->
@@ -234,7 +262,7 @@ class LocalPasswordRepository(
                 ?: return@passmanSessionScope Outcome.Error("vault unreadable", PasswordFailure.VaultUnreadable)
             val entries = parseEntries(vault, "listPasswordEntries")
                 ?: return@passmanSessionScope Outcome.Error("vault undecodable", PasswordFailure.VaultUnreadable)
-            Outcome.Success(entries.sortedBy { it.entryName.lowercase() })
+            Outcome.Success(entries.live().sortedBy { it.entryName.lowercase() })
         } ?: Outcome.Error("no session", PasswordFailure.VaultUnreadable)
     }
 
@@ -245,7 +273,13 @@ class LocalPasswordRepository(
             mutateVault(scope, user.userName, "updatePasswordEntry") { current ->
                 // An index, not a predicate over the whole list: two rows can share a derived uuid,
                 // and rewriting both would overwrite a credential the user never opened.
-                val target = current.indexOfFirst { it.uuid == entry.uuid }
+                //
+                // A tombstoned row is not a target. It is still physically in the vault (that is what
+                // makes the deletion stick across a sync), so without this the edit would rewrite it
+                // — and while `mergeActivity` would carry the deletion record along and keep the row
+                // hidden, the write would have overwritten a deleted credential's fields for nothing
+                // and reported success for an edit the user cannot see.
+                val target = current.indexOfFirst { it.uuid == entry.uuid && !it.isTombstoned }
                 if (target < 0) {
                     // Deleted by another device, or by this one between the read and the save. Not a
                     // reason to write anything: the alternative is re-adding an entry the user
@@ -291,14 +325,24 @@ class LocalPasswordRepository(
                 // One row, by index. `filterNot { it.uuid == passwordUuid }` would remove every row
                 // sharing the uuid, so a user deleting one of their two logins for a site would lose
                 // both — the failure mode this whole field exists to remove, in a louder form.
-                val target = current.indexOfFirst { it.uuid == passwordUuid }
+                //
+                // Already-tombstoned rows are skipped rather than matched, for the same reason: when
+                // two rows share a derived identity and one of them is already deleted, the delete
+                // has to land on the one that is still alive.
+                val target = current.indexOfFirst { it.uuid == passwordUuid && !it.isTombstoned }
                 if (target < 0) {
                     // Already gone. Publishing an identical list would report a delete that did not
                     // happen, and the ordinal that used to name it now names something else.
                     KLogger.w { "deletePasswordEntry: $passwordUuid is not in the vault - nothing to delete" }
                     return@mutateVault null
                 }
-                current.filterIndexed { position, _ -> position != target }
+                // Stamped, not dropped. A dropped row leaves a vault byte-indistinguishable from one
+                // the entry never existed in, so the next merge with a peer that still holds it reads
+                // the row as new and adds it straight back — see [tombstoned].
+                val now = Clock.System.now().toEpochMilliseconds()
+                current.mapIndexed { position, existing ->
+                    if (position == target) existing.tombstoned(now) else existing
+                }
             }
         } ?: false
     }
@@ -324,15 +368,29 @@ class LocalPasswordRepository(
                     // selection, and a count larger than it would be a lie about what was deleted.
                     // Built inside the lambda because a retry has to start from the full set again.
                     val unmatched = passwordUuids.toHashSet()
-                    val kept = current.filterNot { unmatched.remove(it.uuid) }
-                    removed = current.size - kept.size
+                    val now = Clock.System.now().toEpochMilliseconds()
+                    // Counted as the rows are stamped, not as `current.size - kept.size`: nothing is
+                    // removed any more, so a size difference would always be zero and every batch
+                    // delete would report that it deleted nothing.
+                    var stamped = 0
+                    val next = current.map { row ->
+                        // `!isTombstoned` first, so a uuid is never consumed by a row that was
+                        // already deleted while its live namesake goes untouched.
+                        if (!row.isTombstoned && unmatched.remove(row.uuid)) {
+                            stamped++
+                            row.tombstoned(now)
+                        } else {
+                            row
+                        }
+                    }
+                    removed = stamped
                     if (removed == 0) {
                         // None of them are there any more. There is nothing to publish, and the
                         // count the caller gets has to say so.
                         KLogger.w { "deletePasswordEntries: none of the targets are in the vault" }
                         return@mutateVault null
                     }
-                    kept
+                    next
                 }
                 // Nothing published means nothing deleted, and reporting a count for a delete that
                 // never landed would tell the caller its entries are gone when they are still there.
@@ -465,19 +523,23 @@ class LocalPasswordRepository(
      * reaches the same values the peer would have, which is the property the whole scheme rests on.
      * The conflict rule itself is untouched: newer [PasswordEntry.dateCreated] wins.
      *
-     * ## `activity` and `createdAt` are unioned in *both* arms of that decision, not just the winning
-     * one
+     * ## Everything that has to apply "whichever copy wins" lives in [mergeEntry]
      *
-     * The obvious-looking implementation only calls [mergeActivity] when the incoming row replaces the
-     * current one — and it is wrong. When the current row wins instead, the incoming side's unique
-     * activity records would be silently dropped and its earlier `createdAt` would never reach
-     * [minNonZero]. Each device would then keep its own separate history: the mirror merge running on
-     * the peer unions in the *other* direction, so the two vaults' activity lists never converge, and
-     * the next strictly-newer edit drags one side's list back across the sync — history flip-flops
-     * between syncs instead of settling. [minNonZero] would be unreachable in exactly the cases it
-     * exists for. So both branches below write back the union, and only `current == null` (no local row
-     * to union against) takes the incoming row as-is. See [mergeActivity]'s KDoc for why the union
-     * itself has to sort on the full `(at, kind, device)` tuple rather than on `at` alone.
+     * The tombstone check, the `activity` union and the `createdAt` minimum all have to run
+     * regardless of which of the two copies survives the `dateCreated` comparison. Written inline
+     * that used to mean four arms across two merge sites, three of which do nothing by default: a
+     * rule added to only the winning arm applies only when the incoming row happens to be newer, and
+     * the two vaults then never converge — the mirror merge on the peer unions in the *other*
+     * direction, history flip-flops between syncs instead of settling, and [minNonZero] is
+     * unreachable in exactly the cases it exists for. [mergeEntry] is the whole pairwise decision in
+     * one place so there are no arms left to forget; only `current == null` stays here, because there
+     * is no pair to reduce.
+     *
+     * ## A uuid that arrives only as a tombstone is kept as one
+     *
+     * `current == null` takes the incoming row as-is, tombstone included. This device may have no
+     * copy of the entry at all — but a *third* device might, and dropping the tombstone here would
+     * make this vault the thing that hands the entry back to it.
      */
     private fun mergePasswordEntries(
         existing: List<PasswordEntry>,
@@ -486,21 +548,15 @@ class LocalPasswordRepository(
         val byUuid = entryIdentity.stabilize(existing).associateBy { it.uuid }.toMutableMap()
         for (entry in entryIdentity.stabilize(incoming)) {
             val current = byUuid[entry.uuid]
-            byUuid[entry.uuid] = when {
-                current == null -> entry
-                entry.dateCreated > current.dateCreated -> entry.copy(
-                    activity = mergeActivity(current.activity, entry.activity),
-                    createdAt = minNonZero(current.createdAt, entry.createdAt),
-                )
-                else -> current.copy(
-                    activity = mergeActivity(current.activity, entry.activity),
-                    createdAt = minNonZero(current.createdAt, entry.createdAt),
-                )
-            }
+            byUuid[entry.uuid] = if (current == null) entry else mergeEntry(current, entry)
         }
-        return byUuid.values
+        // Expiry is applied to the merged result, not to `existing` on the way in: a tombstone this
+        // side has already reaped can arrive again on the peer's row, and the deadline has to be
+        // enforced against what is about to be written rather than against what was read.
+        return byUuid.values.toList()
+            .withoutExpiredTombstones(Clock.System.now().toEpochMilliseconds())
             .sortedBy { it.entryName.lowercase() }
-            .mapIndexed { index, e -> e.copy(id = (index + 1).toString()) }
+            .withDisplayOrdinals()
     }
 
     /**
@@ -558,6 +614,11 @@ class LocalPasswordRepository(
      * identities forever and one that is written for some other reason simply carries them along.
      * Doing it here rather than at each call site is what stops a mutation from resolving a uuid
      * against rows that have none.
+     *
+     * It deliberately does **not** hide tombstoned rows. Every mutation is a read-modify-write over
+     * whatever this returns, so a filter here would mean the next save republished the vault with
+     * every deleted row silently gone — and a peer that still held one would hand it back on the
+     * following sync. Hiding is the two read methods' job, on the way out.
      */
     private fun parseEntries(vault: OpenVault, caller: String): List<PasswordEntry>? {
         val jsonString = vault.plaintext.decodeToString()

@@ -43,6 +43,7 @@ import java.io.File
 import java.nio.file.Files
 import java.security.KeyPairGenerator
 import kotlin.coroutines.CoroutineContext
+import kotlin.time.Clock
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -282,6 +283,133 @@ class TransferVaultFormatTest {
         assertEquals((1L..20L).toList(), merged.activity.map { it.at }, "the newest 20 survive, oldest dropped")
     }
 
+    // ---------------------------------------------------------- deletion tombstones
+
+    /*
+     * The reconciler is the *second* merge site — `LocalPasswordRepository.mergePasswordEntries` is
+     * the first — and having two implementations of one rule is the risk this section exists for.
+     * Both now share the pairwise decision (`mergeEntry`), but "they share it" is the claim under
+     * test, so every tombstone case pinned in `EntryIdentityTest` is pinned here as well, against the
+     * reconcile path's own decode/merge/write.
+     */
+
+    /** A local deletion must survive a staged file that still holds the row. */
+    @Test
+    fun `a reconciled merge does not resurrect a row the local vault has tombstoned`() = runBlocking<Unit> {
+        val live = entry("gmail", dateCreated = 1_000L)
+        storage.create(user, vaultCipher.encryptVault(json(live.tombstonedAt(realNow), entry("bank")), sessionKey))
+        stage(vaultCipher.encryptVault(json(live), sessionKey))
+
+        assertIs<Outcome.Success<Unit>>(repository().executeReconcileAction(ReconcileAction.Merge))
+
+        val merged = storedEntries()
+        assertEquals(listOf("bank", "gmail"), merged.map { it.entryName }, "the row stays, as a tombstone")
+        assertTrue(
+            merged.single { it.entryName == "gmail" }.isTombstoned,
+            "a staged file that predates the deletion must not bring the entry back to life",
+        )
+    }
+
+    /** And the mirror: the staged file carries the deletion, the local vault still has the row. */
+    @Test
+    fun `a reconciled merge adopts a deletion the staged file carries`() = runBlocking<Unit> {
+        val live = entry("gmail", dateCreated = 1_000L)
+        storage.create(user, vaultCipher.encryptVault(json(live), sessionKey))
+        stage(vaultCipher.encryptVault(json(live.tombstonedAt(realNow)), sessionKey))
+
+        assertIs<Outcome.Success<Unit>>(repository().executeReconcileAction(ReconcileAction.Merge))
+
+        assertTrue(storedEntries().single().isTombstoned)
+    }
+
+    /**
+     * Delete beats a newer edit at this site too, in both directions — the tombstone is checked ahead
+     * of the `dateCreated` comparison, so the row the deletion was stamped on is the row that wins.
+     */
+    @Test
+    fun `a reconciled merge lets a deletion beat a newer edit from either side`() = runBlocking<Unit> {
+        val base = entry("gmail", dateCreated = 1_000L, password = "original")
+        storage.create(user, vaultCipher.encryptVault(json(base.tombstonedAt(realNow)), sessionKey))
+        stage(vaultCipher.encryptVault(json(base.copy(dateCreated = 9_000L, password = "rotated")), sessionKey))
+
+        assertIs<Outcome.Success<Unit>>(repository().executeReconcileAction(ReconcileAction.Merge))
+
+        val staleWins = storedEntries().single()
+        assertTrue(staleWins.isTombstoned, "the staged row's newer dateCreated must not undo the deletion")
+        assertEquals("original", staleWins.password, "the deleted copy takes the row outright")
+
+        // Now the other direction: the local row is the newer edit, the staged file is the tombstone.
+        storage.write(user, vaultCipher.encryptVault(json(base.copy(dateCreated = 9_000L, password = "rotated")), sessionKey))
+        stage(vaultCipher.encryptVault(json(base.tombstonedAt(realNow)), sessionKey))
+
+        assertIs<Outcome.Success<Unit>>(repository().executeReconcileAction(ReconcileAction.Merge))
+
+        val mirrored = storedEntries().single()
+        assertTrue(mirrored.isTombstoned, "and a local row that is newer must not undo the staged deletion")
+        assertEquals("original", mirrored.password)
+    }
+
+    /** The eviction exemption, at this site: twenty-five newer edits must not age the tombstone out. */
+    @Test
+    fun `a reconciled merge never lets the cap evict a tombstone`() = runBlocking<Unit> {
+        val deletedAt = realNow - 10_000L
+        val local = entry("gmail", dateCreated = 1_000L).copy(
+            activity = listOf(EntryActivity(deletedAt, EntryActivity.KIND_DELETED)),
+        )
+        storage.create(user, vaultCipher.encryptVault(json(local), sessionKey))
+        stage(
+            vaultCipher.encryptVault(
+                json(
+                    entry("gmail", dateCreated = 2_000L).copy(
+                        activity = (1L..25L).map { EntryActivity(deletedAt + it, EntryActivity.KIND_EDITED) },
+                    ),
+                ),
+                sessionKey,
+            ),
+        )
+
+        assertIs<Outcome.Success<Unit>>(repository().executeReconcileAction(ReconcileAction.Merge))
+
+        val merged = storedEntries().single()
+        assertEquals(20, merged.activity.size, "the cap still holds in total")
+        assertTrue(merged.isTombstoned, "the tombstone is the oldest record on the row and must still outrank them")
+    }
+
+    /** Expiry, at this site: a tombstone past its window is reaped along with the row it sits on. */
+    @Test
+    fun `a reconciled merge drops a tombstone past ninety days`() = runBlocking<Unit> {
+        val expired = entry("gmail", dateCreated = 1_000L).tombstonedAt(realNow - TOMBSTONE_TTL_MILLIS - 1_000L)
+        storage.create(user, vaultCipher.encryptVault(json(expired, entry("bank")), sessionKey))
+        stage(vaultCipher.encryptVault(json(entry("zoom")), sessionKey))
+
+        assertIs<Outcome.Success<Unit>>(repository().executeReconcileAction(ReconcileAction.Merge))
+
+        assertEquals(
+            listOf("bank", "zoom"),
+            storedEntries().map { it.entryName },
+            "an expired tombstone must be reaped rather than carried forever",
+        )
+    }
+
+    /** Tombstones do not take display ordinals from the live rows the merge renumbers. */
+    @Test
+    fun `a reconciled merge does not spend an ordinal on a tombstone`() = runBlocking<Unit> {
+        storage.create(
+            user,
+            vaultCipher.encryptVault(
+                json(entry("apple"), entry("bank").tombstonedAt(realNow), entry("cat")),
+                sessionKey,
+            ),
+        )
+        stage(vaultCipher.encryptVault(json(entry("zoom")), sessionKey))
+
+        assertIs<Outcome.Success<Unit>>(repository().executeReconcileAction(ReconcileAction.Merge))
+
+        val merged = storedEntries()
+        assertEquals(listOf("1", "2", "3"), merged.filterNot { it.isTombstoned }.map { it.id })
+        assertEquals(TOMBSTONE_ORDINAL, merged.single { it.isTombstoned }.id)
+    }
+
     /**
      * The same derivation on the Overwrite branch, where the failure is quieter: nothing is lost in
      * the moment, but every row lands in the vault without an identity, so the next mutation cannot
@@ -434,6 +562,17 @@ class TransferVaultFormatTest {
         File(root, "database/tmp").mkdirs()
         File(root, "database/tmp/${user.hashCode()}").writeBytes(bytes)
     }
+
+    /**
+     * A real wall-clock reading: tombstone expiry is measured against `Clock.System.now()`, so a
+     * fixture tombstone needs a plausible epoch timestamp rather than the `1_000L`-style values the
+     * rest of this file uses for `dateCreated`.
+     */
+    private val realNow = Clock.System.now().toEpochMilliseconds()
+
+    /** This row as a device that deleted it would have written it — built by hand, not via the SUT. */
+    private fun PasswordEntry.tombstonedAt(at: Long) =
+        copy(activity = activity + EntryActivity(at, EntryActivity.KIND_DELETED))
 
     private fun entry(
         name: String,

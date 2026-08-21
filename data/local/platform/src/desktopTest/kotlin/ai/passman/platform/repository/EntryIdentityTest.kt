@@ -35,6 +35,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.CoroutineContext
+import kotlin.time.Clock
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -761,6 +762,383 @@ class EntryIdentityTest {
         }
     }
 
+    // ---------------------------------------------------------- deletion tombstones
+
+    /*
+     * A delete no longer drops the row: it stamps it with an `EntryActivity.KIND_DELETED` record and
+     * every read hides it. The reason is the shape of both merge sites — a union keyed on uuid with
+     * no arm that can *remove* a uuid. A dropped row leaves a vault byte-indistinguishable from one
+     * the entry never existed in, so the peer's surviving copy comes back as "new" on the next pull.
+     *
+     * These cases are deliberately written in both directions. The pairwise decision is one function
+     * ([mergeEntry]) precisely so there is no winner-arm/loser-arm asymmetry left to get wrong, but
+     * that is the claim under test, not an assumption these tests may make.
+     */
+
+    /** Obligation 1: the local deletion survives a pull from a peer that still holds the row. */
+    @Test
+    fun `a deleted entry is not resurrected by a peer that still holds it`() = runBlocking<Unit> {
+        settledVault("apple", "bank", "cat")
+        val repository = repository()
+        val bank = repository.getPasswordEntries().first { it.entryName == "bank" }
+        assertTrue(repository.deletePasswordEntry(bank.uuid))
+
+        // The peer's copy is exactly the row as it stood before the delete — it never heard about it.
+        val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(bank)).encodeToByteArray()))
+            .pullPasswordDatabase(peerDevice("peer-host"))
+        assertIs<Outcome.Success<Unit>>(outcome)
+
+        assertEquals(listOf("apple", "cat"), repository.getPasswordEntries().map { it.entryName })
+        assertEquals(
+            listOf("bank"),
+            storedEntries().filter { it.isTombstoned }.map { it.entryName },
+            "the tombstone must still be on disk after the merge, or the next pull resurrects the entry",
+        )
+    }
+
+    /** Obligation 2, the mirror direction: the peer deleted it, this device still has it. */
+    @Test
+    fun `a peer's deletion removes an entry this device still holds`() = runBlocking<Unit> {
+        settledVault("apple", "bank", "cat")
+        val repository = repository()
+        val bank = repository.getPasswordEntries().first { it.entryName == "bank" }
+
+        val peer = listOf(bank.tombstonedAt(realNow))
+        val outcome = repository(transferService = FakeTransfer(Json.encodeToString(peer).encodeToByteArray()))
+            .pullPasswordDatabase(peerDevice("peer-host"))
+        assertIs<Outcome.Success<Unit>>(outcome)
+
+        assertEquals(listOf("apple", "cat"), repository.getPasswordEntries().map { it.entryName })
+        assertTrue(
+            storedEntries().single { it.entryName == "bank" }.isTombstoned,
+            "the peer's tombstone must be adopted, not merely hidden for this one read",
+        )
+    }
+
+    /**
+     * Obligation 3. The tombstone is checked *before* the `dateCreated` comparison, so a peer whose
+     * edit is newer than the deletion still loses. "I deleted this and it came back" is worse than "I
+     * deleted it on the wrong device and re-added it", and the comparison it jumps ahead of runs on
+     * raw device wall clocks — a skewed clock must not get to decide whether a credential survives.
+     */
+    @Test
+    fun `a local deletion beats a peer edit with a newer dateCreated`() = runBlocking<Unit> {
+        settledVault("apple", "bank")
+        val repository = repository()
+        val bank = repository.getPasswordEntries().first { it.entryName == "bank" }
+        assertTrue(repository.deletePasswordEntry(bank.uuid))
+
+        val peerEdit = bank.copy(password = "rotated", dateCreated = bank.dateCreated + 100_000L)
+        val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(peerEdit)).encodeToByteArray()))
+            .pullPasswordDatabase(peerDevice("peer-host"))
+        assertIs<Outcome.Success<Unit>>(outcome)
+
+        assertEquals(listOf("apple"), repository.getPasswordEntries().map { it.entryName })
+        val stored = storedEntries().single { it.entryName == "bank" }
+        assertTrue(stored.isTombstoned)
+        assertEquals(
+            "p-bank",
+            stored.password,
+            "the deleted copy takes the row outright: the check runs before the dateCreated comparison, " +
+                "not after it",
+        )
+    }
+
+    /**
+     * Obligation 3's other arm, and the one a winner-arm-only implementation fails: here the *local*
+     * row is the one that wins the scalar comparison, and it is the incoming row that carries the
+     * tombstone.
+     */
+    @Test
+    fun `a peer deletion beats a local edit with a newer dateCreated`() = runBlocking<Unit> {
+        settledVault("apple", "bank")
+        val repository = repository()
+        val bank = repository.getPasswordEntries().first { it.entryName == "bank" }
+        assertTrue(repository.updatePasswordEntry(bank.copy(password = "edited-here")))
+        val edited = repository.getPasswordEntries().first { it.entryName == "bank" }
+        assertTrue(edited.dateCreated > bank.dateCreated, "fixture precondition: the local row is the newer one")
+
+        val peer = listOf(bank.tombstonedAt(realNow))
+        val outcome = repository(transferService = FakeTransfer(Json.encodeToString(peer).encodeToByteArray()))
+            .pullPasswordDatabase(peerDevice("peer-host"))
+        assertIs<Outcome.Success<Unit>>(outcome)
+
+        assertEquals(listOf("apple"), repository.getPasswordEntries().map { it.entryName })
+        val stored = storedEntries().single { it.entryName == "bank" }
+        assertTrue(stored.isTombstoned)
+        assertEquals(
+            "p-bank",
+            stored.password,
+            "the peer's deleted copy takes the row even though the local edit is newer",
+        )
+    }
+
+    /**
+     * Obligation 4, idempotence half. Sync pulls the same peer payload over and over; a tombstone that
+     * survives one merge and not the next is worse than none at all — the entry would flicker back
+     * into the vault on whichever pull happened to lose it.
+     */
+    @Test
+    fun `merging a peer's live copy repeatedly never brings the deleted entry back`() = runBlocking<Unit> {
+        settledVault("apple", "bank")
+        val repository = repository()
+        val bank = repository.getPasswordEntries().first { it.entryName == "bank" }
+        assertTrue(repository.deletePasswordEntry(bank.uuid))
+        val peerBytes = Json.encodeToString(listOf(bank)).encodeToByteArray()
+
+        repeat(3) {
+            assertIs<Outcome.Success<Unit>>(
+                repository(transferService = FakeTransfer(peerBytes)).pullPasswordDatabase(peerDevice("peer-host")),
+            )
+            assertEquals(listOf("apple"), repository.getPasswordEntries().map { it.entryName }, "pull ${it + 1}")
+        }
+        val stored = storedEntries().single { it.entryName == "bank" }
+        assertTrue(stored.isTombstoned)
+        assertEquals(
+            1,
+            stored.activity.count { it.kind == EntryActivity.KIND_DELETED },
+            "repeated merges must not accumulate duplicate tombstone records",
+        )
+    }
+
+    /**
+     * Obligation 4, commutativity half, in the style of
+     * [merge(a,b) and merge(b,a) agree on activity and createdAt]. Vault A deleted the row and takes
+     * the peer's live copy; vault B is the peer and takes A's tombstoned copy. Two devices that ran
+     * the merge in opposite directions must end up holding the same row, or one of them goes on
+     * offering the entry back to the other forever.
+     */
+    @Test
+    fun `a deletion merged in either direction leaves both vaults holding the same tombstone`() = runBlocking<Unit> {
+        val live = entry("gmail", id = "1", dateCreated = 100L, password = "live").copy(
+            uuid = "11111111-2222-3333-4444-555555555555",
+            createdAt = 100L,
+            activity = listOf(EntryActivity(100L, EntryActivity.KIND_CREATED)),
+        )
+        val deleted = live.tombstonedAt(realNow)
+
+        // Vault A (the class's shared storage root): the tombstone is local, the live row arrives.
+        legacyVault(listOf(deleted))
+        assertIs<Outcome.Success<Unit>>(
+            repository(transferService = FakeTransfer(Json.encodeToString(listOf(live)).encodeToByteArray()))
+                .pullPasswordDatabase(peerDevice("peer-host")),
+        )
+        assertEquals(emptyList(), repository().getPasswordEntries(), "A must not resurrect it")
+        val afterA = storedEntries().single()
+
+        // Vault B: a separate root, with the live row local and the tombstone arriving.
+        val otherRoot = Files.createTempDirectory("entry-identity-tombstone").toFile()
+        try {
+            val otherStorage = JvmPasswordDatabaseStorage(
+                object : Platform() {
+                    override fun getLocalPath(): String = otherRoot.absolutePath
+                },
+            )
+            otherStorage.create(
+                user,
+                JvmCryptoService().encryptBytes(Json.encodeToString(listOf(live)).encodeToByteArray(), rsaPublic),
+            )
+            assertIs<Outcome.Success<Unit>>(
+                repository(
+                    storage = otherStorage,
+                    transferService = FakeTransfer(Json.encodeToString(listOf(deleted)).encodeToByteArray()),
+                ).pullPasswordDatabase(peerDevice("peer-host")),
+            )
+            assertEquals(
+                emptyList(),
+                repository(storage = otherStorage).getPasswordEntries(),
+                "B must not keep it alive",
+            )
+            val afterB = Json.decodeFromString<List<PasswordEntry>>(
+                vaultCipher.decryptVault(otherStorage.read(user), sessionKey) { null }.plaintext.decodeToString(),
+            ).single()
+
+            assertEquals(afterA, afterB, "the two vaults must converge on the identical row, ordinal included")
+        } finally {
+            otherRoot.deleteRecursively()
+        }
+    }
+
+    /**
+     * Obligation 5, and the single most likely place for this whole mechanism to fail quietly.
+     *
+     * `mergeActivity` caps a row's history at `MAX_ACTIVITY`, oldest first. The tombstone here is the
+     * *oldest* record on the row and the peer brings twenty-five newer edits, so a plain `takeLast`
+     * evicts it — and an entry with no deletion record on it is, by definition, alive again. Twenty
+     * edits is nothing for a password that gets rotated, so this is the ordinary case, not a corner.
+     */
+    @Test
+    fun `a tombstone is never evicted by the activity cap`() = runBlocking<Unit> {
+        val deletedAt = realNow - 10_000L
+        val local = entry("gmail", id = "1", dateCreated = 100L, password = "local").copy(
+            createdAt = 100L,
+            activity = listOf(EntryActivity(deletedAt, EntryActivity.KIND_DELETED)),
+        )
+        legacyVault(listOf(local))
+
+        val incoming = entry("gmail", id = "1", dateCreated = 200L, password = "rotated").copy(
+            createdAt = 100L,
+            activity = (1L..25L).map { EntryActivity(deletedAt + it, EntryActivity.KIND_EDITED) },
+        )
+        val outcome = repository(transferService = FakeTransfer(Json.encodeToString(listOf(incoming)).encodeToByteArray()))
+            .pullPasswordDatabase(peerDevice("peer-host"))
+        assertIs<Outcome.Success<Unit>>(outcome)
+
+        val stored = storedEntries().single { it.entryName == "gmail" }
+        assertEquals(20, stored.activity.size, "the cap still holds in total")
+        assertTrue(
+            stored.activity.any { it.kind == EntryActivity.KIND_DELETED },
+            "the oldest record on the row is the tombstone, and it must outrank twenty-five newer edits",
+        )
+        assertEquals("local", stored.password, "the deleted copy wins the row, not the peer's later edit")
+        assertEquals(emptyList(), repository().getPasswordEntries())
+    }
+
+    /**
+     * Obligation 6. A tombstone only has to outlive the window in which a stale peer might still hold
+     * the row; past that the row is reaped rather than kept forever, which is what stops the vault
+     * growing monotonically and stops it holding the names of deleted entries indefinitely.
+     *
+     * Reaped from the *disk*, not merely hidden: a row that is only filtered on the way out would sit
+     * in the vault for the lifetime of the account.
+     */
+    @Test
+    fun `a tombstone past ninety days is dropped, and the row with it`() = runBlocking<Unit> {
+        legacyVault(
+            listOf(
+                entry("apple", id = "1", dateCreated = 1_000L),
+                entry("bank", id = "2", dateCreated = 1_001L)
+                    .tombstonedAt(realNow - TOMBSTONE_TTL_MILLIS - 1_000L),
+            ),
+        )
+
+        assertEquals(listOf("apple"), repository().getPasswordEntries().map { it.entryName })
+        assertEquals(
+            listOf("apple"),
+            storedEntries().map { it.entryName },
+            "an expired tombstone must be reaped from the vault, not just hidden from the read",
+        )
+    }
+
+    /** The other side of the deadline: a tombstone inside the window is kept on disk. */
+    @Test
+    fun `a tombstone inside the ninety day window is kept`() = runBlocking<Unit> {
+        legacyVault(
+            listOf(
+                entry("apple", id = "1", dateCreated = 1_000L),
+                entry("bank", id = "2", dateCreated = 1_001L)
+                    .tombstonedAt(realNow - TOMBSTONE_TTL_MILLIS + 60_000L),
+            ),
+        )
+
+        assertEquals(listOf("apple"), repository().getPasswordEntries().map { it.entryName })
+        assertEquals(listOf("apple", "bank"), storedEntries().map { it.entryName }.sorted())
+    }
+
+    /**
+     * A tombstone must not consume a display ordinal. Every read renumbers the live rows `1..N`, and
+     * a hidden row taking a number leaves a hole in the sequence the user can see.
+     */
+    @Test
+    fun `tombstoned rows do not consume display ordinals`() = runBlocking<Unit> {
+        settledVault("apple", "bank", "cat")
+        val repository = repository()
+        val bank = repository.getPasswordEntries().first { it.entryName == "bank" }
+        assertTrue(repository.deletePasswordEntry(bank.uuid))
+
+        assertEquals(listOf("1", "2"), repository.getPasswordEntries().map { it.id })
+        assertEquals(
+            TOMBSTONE_ORDINAL,
+            storedEntries().single { it.isTombstoned }.id,
+            "the tombstone keeps the sentinel ordinal rather than a number a live row could collide with",
+        )
+    }
+
+    /**
+     * Obligation 7, at the layer that actually decides it.
+     *
+     * `EnsureDefaultKeystore` and `EnsureDefaultPgpRings` guard on
+     * `entries.any { it.entryName in knownEntryNames(...) }` over [listPasswordEntries]. If a
+     * tombstoned row answered that predicate, deleting the starter keystore entry would leave the
+     * guard convinced the account was already provisioned — it would set its once-only flag and
+     * refuse to re-create the artifact, permanently. Nothing in either use case had to change for
+     * this; what makes it true is that the repository hides tombstones from the read they use.
+     */
+    @Test
+    fun `a deleted entry is invisible to the provisioning guards' read`() = runBlocking<Unit> {
+        settledVault("alice passman keystore", "gmail")
+        val repository = repository()
+        val provisioned = repository.getPasswordEntries().first { it.entryName == "alice passman keystore" }
+        assertTrue(repository.deletePasswordEntry(provisioned.uuid))
+
+        val listed = repository.listPasswordEntries()
+
+        assertIs<Outcome.Success<List<PasswordEntry>>>(listed)
+        assertEquals(
+            listOf("gmail"),
+            listed.value.map { it.entryName },
+            "a tombstoned row must read as absent, or the guard refuses to re-provision a deleted default",
+        )
+    }
+
+    /** A delete of an entry whose twin shares its derived identity must take the live twin. */
+    @Test
+    fun `deleting both namesakes in turn tombstones one row each time`() = runBlocking<Unit> {
+        legacyVault(
+            listOf(
+                entry("gmail", id = "1", dateCreated = 1_000L, username = "alice", password = "first"),
+                entry("gmail", id = "2", dateCreated = 1_001L, username = "alice", password = "second"),
+            ),
+        )
+        val repository = repository()
+        val twins = repository.getPasswordEntries()
+        assertEquals(twins[0].uuid, twins[1].uuid, "fixture precondition: they share an identity")
+
+        assertTrue(repository.deletePasswordEntry(twins[0].uuid))
+        assertEquals(1, repository.getPasswordEntries().size, "exactly one row goes")
+
+        assertTrue(repository.deletePasswordEntry(twins[0].uuid), "the second delete must find the surviving twin")
+        assertEquals(emptyList(), repository.getPasswordEntries())
+        assertEquals(2, storedEntries().count { it.isTombstoned }, "both rows are stamped, neither is dropped")
+    }
+
+    /** The batch delete's count has to keep meaning "rows removed" now that no row is removed. */
+    @Test
+    fun `a batch delete reports the rows it tombstoned`() = runBlocking<Unit> {
+        settledVault("apple", "bank", "cat")
+        val repository = repository()
+        val entries = repository.getPasswordEntries()
+
+        val removed = repository.deletePasswordEntries(
+            setOf(
+                entries.first { it.entryName == "apple" }.uuid,
+                entries.first { it.entryName == "cat" }.uuid,
+                identity.legacyUuid("never-existed", "nobody"),
+            ),
+        )
+
+        assertEquals(2, removed, "the count must survive rows no longer shrinking the list")
+        assertEquals(listOf("bank"), repository.getPasswordEntries().map { it.entryName })
+        assertEquals(listOf("apple", "cat"), storedEntries().filter { it.isTombstoned }.map { it.entryName }.sorted())
+    }
+
+    /** A batch delete run twice over the same selection removes nothing the second time. */
+    @Test
+    fun `a batch delete of already tombstoned rows reports zero`() = runBlocking<Unit> {
+        settledVault("apple", "bank")
+        val repository = repository()
+        val apple = repository.getPasswordEntries().first { it.entryName == "apple" }
+        assertEquals(1, repository.deletePasswordEntries(setOf(apple.uuid)))
+
+        val counting = CountingStorage(storage)
+        assertEquals(
+            0,
+            repository(storage = counting).deletePasswordEntries(setOf(apple.uuid)),
+            "a row that is already a tombstone is not a row to delete",
+        )
+        assertEquals(0, counting.writes, "and nothing may be published for it")
+    }
+
     // ------------------------------------------------------- addressing a row
 
     /**
@@ -1154,6 +1532,25 @@ class EntryIdentityTest {
 
     private fun storedEntries(): List<PasswordEntry> =
         Json.decodeFromString(vaultCipher.decryptVault(storage.read(user), sessionKey) { null }.plaintext.decodeToString())
+
+    /**
+     * A real wall-clock reading, taken once per test.
+     *
+     * Tombstone expiry is the one rule in this file measured against `Clock.System.now()` rather than
+     * against another field of the row, so a tombstone fixture has to carry a plausible epoch
+     * timestamp. The `at = 100L`-style values the activity fixtures above use are 1970, which every
+     * expiry check would read as ninety days stale.
+     */
+    private val realNow = Clock.System.now().toEpochMilliseconds()
+
+    /**
+     * This row as a peer that deleted it would have written it.
+     *
+     * The record is appended by hand rather than through the production `tombstoned` helper: a
+     * fixture built out of the code under test asserts that the code agrees with itself.
+     */
+    private fun PasswordEntry.tombstonedAt(at: Long) =
+        copy(activity = activity + EntryActivity(at, EntryActivity.KIND_DELETED))
 
     private fun entry(
         name: String,

@@ -56,11 +56,11 @@ The pairing port (2324) is plaintext **by design**: the safety number authentica
 
 Honest answers, because this is where sync tools usually hand-wave:
 
-- **Deletions do not propagate.** Merging is a union with no tombstones: delete an entry on device A, sync with B, and the entry comes back. To really delete something, delete it on **both** devices before syncing. This is deliberate — the merge will never silently destroy a credential — but it is the number-one surprise, so it is first on this list.
-- **Password entries merge by ID.** Every entry on either device survives; nothing is dropped.
+- **Deleting an entry sticks, and beats a conflicting edit.** A deleted entry leaves a tombstone behind, so the deletion travels with the next sync instead of being undone by it — delete on device A, sync with B, and it is gone on both. If the other device edited the same entry in the meantime, the deletion still wins, whatever the two clocks say; there is no undelete, so re-adding the entry is the way back. Tombstones are dropped after 90 days, so a device that has been out of contact for longer than that can still bring an entry back when it finally syncs. Deleting a **PGP key or keystore** does not propagate — that is file-level sync, see below.
+- **Password entries merge by ID.** Every entry on either device survives, unless one of them deleted it.
 - **Same entry edited on both devices:** the whole entry with the newer modification time wins — there is no field-level merge. Timestamps are raw device clocks, so a device with a skewed clock consistently wins (or loses); on a tie the local copy stays.
 - **Renames are safe** for entries created by current builds. Very old builds derived an entry's ID from its name and username, so a rename of such an entry can show up as a duplicate after sync — delete the extra.
-- **PGP keys and keystores are file-level:** same filename means the received copy overwrites yours, with no timestamp comparison; files only one side has are kept. Deletions do not propagate here either.
+- **PGP keys and keystores are file-level:** same filename means the received copy overwrites yours, with no timestamp comparison; files only one side has are kept. Deletions do not propagate for these — delete the file on both devices.
 
 (The Merge / Overwrite / Skip dialog belongs to the one-way **Settings → Transfer** flow, not to sync — sync never prompts.)
 
@@ -76,9 +76,9 @@ Honest answers, because this is where sync tools usually hand-wave:
 ### Known limits
 
 - Manual only — no background or scheduled sync, and each artifact syncs separately.
-- Deletions resurrect (see above); delete on both devices.
+- Deleted entries stay deleted for 90 days (see above); deleted PGP keys and keystores still resurrect — delete those on both devices.
 - Whole-artifact transfers, no deltas.
-- Both devices must run the same build; cross-version sync is unsupported.
+- Both devices must run the same build; cross-version sync is unsupported. A build old enough to predate entry history will drop the tombstone on a deleted entry and sync it back alive.
 - **PGP key algorithms are part of that.** Keys can be created with RSA, DSA/ElGamal, or one of the
   elliptic-curve options (Ed25519 + Curve25519, NIST ECDSA + ECDH, Ed25519 + X25519, Ed448 + X448).
   A build that predates an algorithm cannot read a key that uses it, so syncing PGP keys to an older

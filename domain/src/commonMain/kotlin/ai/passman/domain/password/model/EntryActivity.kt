@@ -25,9 +25,9 @@ import kotlinx.serialization.Serializable
  * forward-compat property this field exists to buy.
  *
  * Readers must treat an unrecognised kind as "something happened", render it generically, and never
- * crash on it — never assume every record is one of [KIND_CREATED] / [KIND_EDITED].
+ * crash on it — never assume every record is one of [KIND_CREATED] / [KIND_EDITED] / [KIND_DELETED].
  *
- * Wire values are format, not code style, and are pinned here: `"created"`, `"edited"`.
+ * Wire values are format, not code style, and are pinned here: `"created"`, `"edited"`, `"deleted"`.
  */
 @Serializable
 data class EntryActivity(
@@ -38,5 +38,25 @@ data class EntryActivity(
     companion object {
         const val KIND_CREATED = "created"
         const val KIND_EDITED = "edited"
+
+        /**
+         * The deletion tombstone: a row carrying one of these is deleted, and every read hides it.
+         *
+         * A record rather than a `deleted: Boolean = false` field on
+         * [ai.passman.domain.password.model.PasswordEntry], for the forward-compatibility reason the
+         * `kind: String` decision above is about. `VaultJson` runs with `encodeDefaults = false`, so a
+         * peer on a build that does not know a new boolean field would **strip** it the moment it
+         * re-encoded the row, and then sync the entry back looking alive — the exact resurrection the
+         * tombstone exists to stop. An unknown *kind* inside a known field round-trips verbatim
+         * instead, so a peer one build behind carries the tombstone across untouched.
+         *
+         * Two rules ride on this constant, both in `data/local/platform`:
+         *
+         * - `mergeActivity` must never let its `MAX_ACTIVITY` cap evict a record of this kind ahead
+         *   of an ordinary one, or a busy entry's tombstone ages out and the entry resurrects.
+         * - The row is dropped, tombstone and all, once the record is 90 days old; a tombstone only
+         *   has to outlive the window in which a stale peer might still be holding the row.
+         */
+        const val KIND_DELETED = "deleted"
     }
 }

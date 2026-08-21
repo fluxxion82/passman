@@ -78,6 +78,11 @@ data class PasswordEntry(
      * append-and-trim never drifts from the merge's notion of "keep the newest". Creation seeds the
      * list directly with its single [EntryActivity.KIND_CREATED] record, which starts life under the
      * cap with nothing to merge against.
+     *
+     * This list is also load-bearing for deletion: an [EntryActivity.KIND_DELETED] record here *is*
+     * the tombstone that keeps a deleted entry from coming back on the next sync, and it is exempt
+     * from the cap for that reason. See that constant's KDoc before touching how this field is
+     * written or trimmed.
      */
     val activity: List<EntryActivity> = emptyList(),
 )

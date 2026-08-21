@@ -105,6 +105,41 @@ class PasswordEntryCompatTest {
     }
 
     /**
+     * The tombstone's forward-compatibility claim, at the model level.
+     *
+     * A deletion is an [EntryActivity.KIND_DELETED] record rather than a `deleted: Boolean = false`
+     * field on [PasswordEntry] precisely so a peer that does not know the kind cannot destroy it. A
+     * new boolean would be stripped by that peer's re-encode — `encodeDefaults` is off, so a field it
+     * cannot see is a field it writes back at its default — and the entry would sync home looking
+     * alive. An unrecognised *kind* inside a field the peer does know round-trips byte for byte, so
+     * the tombstone crosses a build that has never heard of it untouched.
+     *
+     * Deliberately asserted against the `"deleted"` wire value and not against the constant on the
+     * left of the comparison: what has to hold is the bytes, and a rename of the constant that
+     * changed them would be a silent wire break.
+     */
+    @Test
+    fun `a deletion tombstone round-trips through a build that does not know the kind`() {
+        val wireJson =
+            """{"id":"1","entryName":"gmail","username":"mia","password":"pw","website":"","notes":"",""" +
+                """"dateCreated":900,"uuid":"u-1","createdAt":500,"activity":[{"at":700,"kind":"deleted"}]}"""
+
+        val entry = json.decodeFromString<PasswordEntry>(wireJson)
+
+        assertEquals("deleted", EntryActivity.KIND_DELETED, "the tombstone's wire value is format, not code style")
+        assertEquals(
+            listOf(EntryActivity(700, EntryActivity.KIND_DELETED)),
+            entry.activity,
+            "a build that treats the kind as an opaque string still decodes the tombstone",
+        )
+        assertEquals(
+            wireJson,
+            json.encodeToString(entry),
+            "and re-encodes it verbatim, so a peer one build behind cannot resurrect the entry by saving it",
+        )
+    }
+
+    /**
      * Obligation 12. `encodeDefaults` is off (`VaultJson.kt`'s production `Json` instance, mirrored
      * here), so a field left at its default must be entirely absent from the JSON — not written as
      * `"createdAt":0` or `"activity":[]` — or every existing vault would grow the moment it is
