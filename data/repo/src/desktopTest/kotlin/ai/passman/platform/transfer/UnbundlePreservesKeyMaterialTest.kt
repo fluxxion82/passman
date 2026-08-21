@@ -222,6 +222,25 @@ class UnbundlePreservesKeyMaterialTest {
         )
     }
 
+    @Test
+    fun `a deeply nested entry still preserves`() {
+        // A nested entry flattens its entire path into one conflict filename, so components that are
+        // each legal can still overflow the filesystem's limit. That threw from the rename — failing
+        // safe for the live file, but aborting the unbundle mid-commit, and aborting again on every
+        // later sync of that path. A peer could wedge a directory's sync for good.
+        val deep = (1..8).joinToString("/") { "component-$it-" + "x".repeat(28) } + "/secret_ring.asc"
+
+        DirectoryBundler.unbundle(zipOf(deep to LOCAL), destDir)
+        DirectoryBundler.unbundle(zipOf(deep to INBOUND), destDir)
+
+        assertContentEquals(INBOUND, File(destDir, deep).readBytes())
+        assertContentEquals(LOCAL, preservedBytes().single())
+        assertTrue(
+            DirectoryBundler.preservedCopies(destDir).single().name.toByteArray().size <= 255,
+            "a conflict filename must fit what the filesystem accepts",
+        )
+    }
+
     // ---- helpers ---------------------------------------------------------------------------
 
     /** Every preserved copy for [destDir], whatever the conflict store chooses to name them. */

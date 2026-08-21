@@ -367,6 +367,18 @@ object DirectoryBundler {
      */
     private const val CONFLICT_STORE_SUFFIX = ".conflicts"
 
+    /**
+     * Cap for a conflict filename, in UTF-8 bytes. Filesystems typically stop at 255; the margin
+     * covers the ones that do not.
+     *
+     * A nested entry flattens its whole path into one filename, so a path with legal components can
+     * still exceed the limit. Without this cap the rename throws, and because the throw happens
+     * before the replace the live file survives — but the unbundle aborts partway through its
+     * commit loop, and it aborts again on every later sync carrying different bytes for that path.
+     * A peer could wedge a directory's sync permanently, with nothing in the app to explain it.
+     */
+    private const val MAX_CONFLICT_NAME_BYTES = 200
+
     /** True when [live] already holds exactly what [incoming] would write. */
     internal fun isUnchanged(live: File, incoming: File): Boolean =
         live.isFile &&
@@ -421,9 +433,33 @@ object DirectoryBundler {
             .take(16)
             .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
         val flattened = relative.replace(File.separatorChar, '_').replace('/', '_')
-        val base = flattened.substringBeforeLast('.', flattened)
-        val extension = flattened.substringAfterLast('.', "")
+        val extension = flattened.substringAfterLast('.', "").take(MAX_CONFLICT_NAME_BYTES)
+        // Budget what is left after the digest and extension, which are the parts that must survive
+        // intact. Truncating the readable half costs nothing: the digest is what makes the name
+        // unique, so two entries sharing a truncated prefix still separate unless their bytes match,
+        // and matching bytes are the case where sharing a name is correct.
+        val budget = MAX_CONFLICT_NAME_BYTES - digest.length - extension.length - 2
+        val base = flattened.substringBeforeLast('.', flattened).takeUtf8Bytes(budget)
         return if (extension.isEmpty()) "$base.$digest" else "$base.$digest.$extension"
+    }
+
+    /**
+     * Longest prefix of this string whose UTF-8 encoding fits [maxBytes], cut on a char boundary.
+     *
+     * Bytes rather than characters because that is what the filesystem limits, and these names come
+     * from peer-authored zip entries, which may be any UTF-8 at all.
+     */
+    private fun String.takeUtf8Bytes(maxBytes: Int): String {
+        if (maxBytes <= 0) return ""
+        var used = 0
+        val out = StringBuilder()
+        for (character in this) {
+            val size = character.toString().toByteArray(Charsets.UTF_8).size
+            if (used + size > maxBytes) break
+            out.append(character)
+            used += size
+        }
+        return out.toString()
     }
 
     class BundleTooLargeException(message: String) : Exception(message)
