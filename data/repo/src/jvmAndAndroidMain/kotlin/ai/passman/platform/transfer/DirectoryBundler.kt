@@ -380,6 +380,9 @@ object DirectoryBundler {
      */
     private const val MAX_CONFLICT_NAME_BYTES = 200
 
+    /** 128 bits: a collision here would put two different secret rings on one name. */
+    private const val DIGEST_BYTES = 16
+
     /**
      * Names the file a preserve renames the live artifact onto before it knows what to call it.
      *
@@ -460,18 +463,50 @@ object DirectoryBundler {
     private fun conflictName(displaced: ByteArray, relative: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
             .digest(displaced)
-            .take(16)
+            .take(DIGEST_BYTES)
             .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
-        val flattened = relative.replace(File.separatorChar, '_').replace('/', '_')
-        val extension = flattened.substringAfterLast('.', "").take(MAX_CONFLICT_NAME_BYTES)
-        // Budget what is left after the digest and extension, which are the parts that must survive
-        // intact. Truncating the readable half costs nothing: the digest is what makes the name
-        // unique, so two entries sharing a truncated prefix still separate unless their bytes match,
-        // and matching bytes are the case where sharing a name is correct.
-        val budget = MAX_CONFLICT_NAME_BYTES - digest.length - extension.length - 2
-        val base = flattened.substringBeforeLast('.', flattened).takeUtf8Bytes(budget)
-        return if (extension.isEmpty()) "$base.$digest" else "$base.$digest.$extension"
+        // Budget what is left after the digest, which must survive intact. Truncating the readable
+        // half costs nothing: the digest is what makes the name unique, so two entries sharing a cut
+        // prefix still separate unless their bytes match — and matching bytes are the one case where
+        // sharing a name is correct.
+        val budget = MAX_CONFLICT_NAME_BYTES - digest.length - 1
+        return "$digest-${encodeRelative(relative).takeUtf8Bytes(budget)}"
     }
+
+    /**
+     * The bundle-relative path a preserved copy was displaced from, for display and for restore.
+     *
+     * Recovering it has to be exact, because restoring a copy means putting it back where it came
+     * from. That is why [encodeRelative] escapes separators reversibly instead of flattening them to
+     * underscores, and why the digest leads: it is a fixed 32 hex characters with no `-`, so the
+     * first `-` is unambiguously the separator no matter what the path contains.
+     *
+     * Returns the whole name if it does not parse — a hand-copied file in the store is still a file
+     * worth showing, and inventing a path for it would be worse than admitting the name is all there
+     * is.
+     */
+    fun originalPathOf(preserved: File): String {
+        val name = preserved.name
+        val separator = name.indexOf('-')
+        if (separator != DIGEST_BYTES * 2) return name
+        return decodeRelative(name.substring(separator + 1))
+    }
+
+    /**
+     * Escapes a bundle-relative path into a single filename, reversibly.
+     *
+     * `%` first, then the separator, so that decoding in the mirror order round-trips a path that
+     * genuinely contains the escape sequence: `a%2Fb` encodes to `a%252Fb`, which decodes back to
+     * `a%2Fb` rather than to `a/b`.
+     */
+    private fun encodeRelative(relative: String): String = relative
+        .replace(File.separatorChar, '/')
+        .replace("%", "%25")
+        .replace("/", "%2F")
+
+    private fun decodeRelative(encoded: String): String = encoded
+        .replace("%2F", "/")
+        .replace("%25", "%")
 
     /**
      * Longest prefix of this string whose UTF-8 encoding fits [maxBytes], cut on a char boundary.

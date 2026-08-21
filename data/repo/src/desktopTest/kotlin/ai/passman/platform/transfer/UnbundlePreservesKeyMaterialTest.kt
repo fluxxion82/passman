@@ -220,6 +220,36 @@ class UnbundlePreservesKeyMaterialTest {
             entryNames(DirectoryBundler.bundle(destDir)),
             "no preserved copy may appear in an outbound bundle",
         )
+        assertEquals(
+            "sub/work_secret_ring.asc",
+            DirectoryBundler.originalPathOf(DirectoryBundler.preservedCopies(destDir).single()),
+            "restore has to put a copy back where it came from, so the path must round-trip",
+        )
+    }
+
+    @Test
+    fun `an original path survives characters that collide with the escape`() {
+        // A path containing the escape sequence itself must not decode into a different path — the
+        // difference between restoring a file and creating a directory that was never there.
+        val awkward = "od%2Fd name.asc"
+        File(destDir, awkward).writeBytes(LOCAL)
+
+        DirectoryBundler.unbundle(zipOf(awkward to INBOUND), destDir)
+
+        assertEquals(awkward, DirectoryBundler.originalPathOf(DirectoryBundler.preservedCopies(destDir).single()))
+    }
+
+    @Test
+    fun `a hand-copied file in the store still reports something`() {
+        // The store is a plain directory, so a user may put a file in it. Showing its name beats
+        // inventing a path, and beats hiding a file that may be someone's only copy.
+        File(destDir, "work_secret_ring.asc").writeBytes(LOCAL)
+        DirectoryBundler.unbundle(zipOf("work_secret_ring.asc" to INBOUND), destDir)
+        val strange = File(DirectoryBundler.conflictStore(destDir), "rescued-by-hand.asc")
+        strange.writeBytes(ByteArray(4))
+
+        assertEquals("rescued-by-hand.asc", DirectoryBundler.originalPathOf(strange))
+        assertEquals(2, DirectoryBundler.preservedCopies(destDir).size, "a hand-placed file must still be listed")
     }
 
     @Test
