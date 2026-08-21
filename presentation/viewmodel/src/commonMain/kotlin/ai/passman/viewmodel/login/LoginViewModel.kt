@@ -73,6 +73,24 @@ open class LoginViewModel(
      */
     private var biometricStateJob: Job? = null
 
+    /**
+     * Raised at most once per screen. An enrolled user should meet the system prompt on arrival
+     * rather than having to find the fingerprint icon — but exactly once, because the two obvious
+     * ways to get this wrong are both worse than not doing it. Re-raising after a cancel traps the
+     * user in a prompt they are trying to dismiss, and raising it on a username *edit* would fire a
+     * full-screen system dialog while they are still typing. So it fires only from the initial load,
+     * and the icon remains the way to ask for it again.
+     */
+    private var biometricPromptRaised = false
+
+    /**
+     * Set by the first edit of either field. The remembered-username read is asynchronous, so a user
+     * who starts typing before it lands would otherwise be interrupted by a full-screen system
+     * prompt mid-keystroke — the arrival prompt is for someone who arrived and waited, not for
+     * someone already at work.
+     */
+    private var userHasTyped = false
+
     init {
         viewModelScope.launch {
             // A suggestion list is a convenience; a preferences read failure must not
@@ -82,16 +100,18 @@ open class LoginViewModel(
                 .getOrDefault(emptyList())
             knownUsernames.value = loaded
             if (username.isEmpty()) loaded.firstOrNull()?.let { username = it }
-            refreshBiometricUnlock()
+            refreshBiometricUnlock(autoPrompt = true)
         }
     }
 
     fun onUsernameChange(username: String) {
+        userHasTyped = true
         this.username = username
         refreshBiometricUnlock()
     }
 
     fun onPasswordChange(password: String) {
+        userHasTyped = true
         this.password = password
     }
 
@@ -219,7 +239,7 @@ open class LoginViewModel(
         return offer
     }
 
-    private fun refreshBiometricUnlock() {
+    private fun refreshBiometricUnlock(autoPrompt: Boolean = false) {
         biometricStateJob?.cancel()
         val name = username
         biometricStateJob = viewModelScope.launch {
@@ -234,6 +254,13 @@ open class LoginViewModel(
                 null
             }
             canBioAuth.value = state?.canUnlock == true
+
+            if (autoPrompt && canBioAuth.value && !biometricPromptRaised && !userHasTyped && !isLoading.value) {
+                // Latched before the call, not after: onBioAuth suspends into a system prompt, and
+                // anything that re-entered here meanwhile would raise a second one.
+                biometricPromptRaised = true
+                onBioAuth()
+            }
         }
     }
 }

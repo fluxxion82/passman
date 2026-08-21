@@ -350,6 +350,86 @@ class LoginViewModelTest {
     // ------------------------------------------- the one-time enrolment offer
 
     /** A view model whose login always succeeds, so the tests below are only about the offer. */
+    /**
+     * An enrolled user should meet the prompt on arrival rather than hunting for the fingerprint
+     * icon. This is the whole behaviour: the view model raises it itself, with nothing tapped.
+     */
+    @Test
+    fun `an enrolled account is prompted as soon as the login screen loads`() = runTest {
+        val biometrics = FakeBiometricUnlockRepository().apply { enrolledUsers += "mia" }
+        val loginUser: LoginUser = mockk()
+        coEvery { loginUser.invoke(any()) } returns Outcome.Success(UserState.LoggedIn)
+
+        arrivingVm(loginUser, biometrics)
+        runCurrent()
+
+        coVerify(exactly = 1) { loginUser.invoke(LoginUser.LoginRequest.BioAuth("mia")) }
+    }
+
+    /**
+     * The first way this goes wrong. A cancelled prompt must not be re-raised, or the user is stuck
+     * in a dialog they are trying to dismiss and the icon is unreachable behind it.
+     */
+    @Test
+    fun `a dismissed prompt is not raised a second time`() = runTest {
+        val biometrics = FakeBiometricUnlockRepository().apply { enrolledUsers += "mia" }
+        val loginUser: LoginUser = mockk()
+        coEvery { loginUser.invoke(any()) } returns
+            Outcome.Error("cancelled", AuthFailure.BioAuthCancelled)
+
+        val vm = arrivingVm(loginUser, biometrics)
+        runCurrent()
+        // Whatever the screen does next — a state refresh, the user typing — must not re-prompt.
+        vm.onPasswordChange("pw")
+        runCurrent()
+
+        coVerify(exactly = 1) { loginUser.invoke(LoginUser.LoginRequest.BioAuth("mia")) }
+    }
+
+    /**
+     * The second way this goes wrong, and the more obnoxious one: raising a full-screen system
+     * dialog while the user is still typing a username.
+     */
+    @Test
+    fun `typing a username that happens to be enrolled does not raise the prompt`() = runTest {
+        val biometrics = FakeBiometricUnlockRepository().apply { enrolledUsers += "mia" }
+        val loginUser: LoginUser = mockk()
+        coEvery { loginUser.invoke(any()) } returns Outcome.Success(UserState.LoggedIn)
+        // No known usernames, so nothing is prefilled and the initial load prompts for nobody.
+        val vm = newVm(loginUser, biometrics = biometrics)
+        runCurrent()
+
+        vm.onUsernameChange("mia")
+        runCurrent()
+
+        assertTrue(vm.canBioAuth.value, "the icon should still be offered")
+        coVerify(exactly = 0) { loginUser.invoke(any()) }
+    }
+
+    @Test
+    fun `an account with no enrolment is not prompted on arrival`() = runTest {
+        val loginUser: LoginUser = mockk()
+        coEvery { loginUser.invoke(any()) } returns Outcome.Success(UserState.LoggedIn)
+
+        arrivingVm(loginUser, FakeBiometricUnlockRepository())
+        runCurrent()
+
+        coVerify(exactly = 0) { loginUser.invoke(any()) }
+    }
+
+    /** A view model that lands on the screen with a remembered username, the way the app does. */
+    private fun arrivingVm(
+        loginUser: LoginUser,
+        biometrics: FakeBiometricUnlockRepository,
+    ) = LoginViewModel(
+        loginUser = loginUser,
+        getKnownUsernames = GetKnownUsernames(FakeUserPreferences(listOf("mia"))),
+        loginAttemptThrottle = LoginAttemptThrottle(timeSource = TestTimeSource()),
+        getBiometricUnlockState = biometricState(biometrics),
+        offerBiometricUnlock = offerBiometricUnlock(biometrics),
+        setBiometricUnlock = setBiometricUnlock(biometrics),
+    )
+
     private fun offeringVm(biometrics: FakeBiometricUnlockRepository): LoginViewModel {
         val loginUser: LoginUser = mockk()
         coEvery { loginUser.invoke(any()) } returns Outcome.Success(UserState.LoggedIn)
