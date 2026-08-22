@@ -57,8 +57,10 @@ android {
 
     defaultConfig {
         applicationId = "ai.passman.android"
-        versionCode = 6
-        versionName = "1.0.0"
+        // Shared with apps/desk via gradle.properties so the two apps can't report different
+        // versions of the same release. trim() for the same reason as the signing values above.
+        versionCode = providers.gradleProperty("VERSION_CODE").get().trim().toInt()
+        versionName = providers.gradleProperty("VERSION_NAME").get().trim()
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

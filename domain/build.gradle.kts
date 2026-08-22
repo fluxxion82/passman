@@ -4,9 +4,6 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
-group = "ai.passman.domain"
-version = "0.0.1"
-
 kotlin {
     applyDefaultHierarchyTemplate()
 

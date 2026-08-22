@@ -6,9 +6,6 @@ plugins {
     alias(libs.plugins.compose.compiler)
 }
 
-group = "ai.passman"
-version = "1.0.3"
-
 // Build variants, in the spirit of Android build types. `src/debug` and `src/prod` each supply
 // `ai.passman.di.buildVariantModule`; exactly one is compiled into the app, so the profile is a
 // compile-time fact rather than something a launcher can get wrong. Debug and prod are fully
@@ -23,10 +20,10 @@ require(buildVariant == "debug" || buildVariant == "prod") {
 }
 kotlin.sourceSets["main"].kotlin.srcDir("src/$buildVariant/kotlin")
 
-// The version the app reports at runtime — Settings shows it — is generated from `version` above
-// rather than written out a second time in Kotlin. The literal it replaces in BuildConfigModule had
-// already drifted three patch releases behind this line, which makes the number worse than useless:
-// a tester reading it would name the wrong build.
+// The version the app reports at runtime — Settings shows it — is generated from the project
+// version rather than written out a second time in Kotlin. The literal it replaces in
+// BuildConfigModule had already drifted three patch releases behind the build file, which makes the
+// number worse than useless: a tester reading it would name the wrong build.
 val versionPropertiesDir = layout.buildDirectory.dir("generated/version")
 val generateVersionProperties by tasks.registering(WriteProperties::class) {
     destinationFile.set(versionPropertiesDir.map { it.file("passman-version.properties") })
