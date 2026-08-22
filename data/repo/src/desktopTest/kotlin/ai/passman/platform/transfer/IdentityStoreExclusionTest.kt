@@ -76,8 +76,20 @@ class IdentityStoreExclusionTest {
         val identityStore = File(destDir, "$user.pfx")
         identityStore.writeBytes(LOCAL_IDENTITY)
 
-        DirectoryBundler.unbundle(zipOf("alice.pfx" to PEER_BYTES), destDir, excludeBaseNames = exclusions)
+        // A second, ordinary entry rides along so this proves the unbundle RAN and skipped one file,
+        // rather than passing because nothing was installed at all - discarding every entry would
+        // otherwise satisfy every assertion below.
+        DirectoryBundler.unbundle(
+            zipOf("alice.pfx" to PEER_BYTES, "shared.p12" to PEER_BYTES),
+            destDir,
+            excludeBaseNames = exclusions,
+        )
 
+        assertContentEquals(
+            PEER_BYTES,
+            File(destDir, "shared.p12").readBytes(),
+            "a non-excluded entry in the same bundle must have been installed",
+        )
         assertContentEquals(
             LOCAL_IDENTITY,
             identityStore.readBytes(),
@@ -108,6 +120,51 @@ class IdentityStoreExclusionTest {
 
         assertEquals(listOf("shared.p12"), entries, "the identity store must never reach the bundle")
     }
+
+    /**
+     * A hard link to the identity store is not a way to ship it under another name.
+     *
+     * A hard link is an independent directory entry for the same inode, so `canonicalPath` returns
+     * the link's own path and the name is whatever it was called — `shared.pfx` linked to
+     * `alice.pfx` matched neither the name set nor the resolved set, and `bundle` zipped the RSA
+     * private key under an innocent name. Only the filesystem's own identity for the file catches
+     * it.
+     *
+     * Not an attack: creating one needs write access to the account directory, and anyone with that
+     * could read the key outright. It is the accident that matters — a backup tool, a restore, or a
+     * sync client that de-duplicates by linking, none of which know this file is special.
+     *
+     * Skipped where the platform reports no file key, since there is nothing to compare there.
+     */
+    @Test
+    fun aHardLinkToTheIdentityStoreIsNotShipped() {
+        val user = "alice"
+        val dir = File(tempDir, "keystore${File.separator}$user").apply { mkdirs() }
+        val identityStore = File(dir, "$user.pfx").apply { writeBytes(LOCAL_IDENTITY) }
+        val link = File(dir, "shared.pfx")
+        java.nio.file.Files.createLink(link.toPath(), identityStore.toPath())
+        if (fileKeyOf(link) == null) return // platform reports no file key
+
+        assertTrue(
+            link.canonicalPath != identityStore.canonicalPath,
+            "precondition: a hard link canonicalises to its own path, which is why this needs a key",
+        )
+
+        val entries = entryNames(DirectoryBundler.bundle(dir, DirectoryBundler.syncExclusions(user)))
+
+        assertEquals(
+            emptyList(),
+            entries,
+            "the identity store must not reach the bundle under a second name for the same inode",
+        )
+    }
+
+    private fun fileKeyOf(file: File): Any? = runCatching {
+        java.nio.file.Files.readAttributes(
+            file.toPath(),
+            java.nio.file.attribute.BasicFileAttributes::class.java,
+        ).fileKey()
+    }.getOrNull()
 
     /** The control: an ordinary account is unaffected, in both directions. */
     @Test

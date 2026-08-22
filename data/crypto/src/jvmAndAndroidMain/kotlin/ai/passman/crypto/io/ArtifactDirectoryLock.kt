@@ -99,7 +99,7 @@ class ArtifactDirectoryBusyException(message: String) : IllegalStateException(me
  *
  * The two are not disjoint, though an earlier draft of the design assumed they were. The exclusion
  * list that argument rested on compares basename *strings* while the filesystem resolves *paths*,
- * and `IdentityStoreDisplaceableTest` demonstrates three ways the two disagree on the identity
+ * and `IdentityStoreExclusionTest` demonstrates three ways the two disagree on the identity
  * store's own name. So `<user>.pfx` is reachable both by writers holding only this lock and by
  * `JvmKeyStoreClient`'s two `IdentityStoreLock` paths, and the order matters.
  *

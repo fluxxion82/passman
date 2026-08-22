@@ -41,7 +41,7 @@ class JvmPortableVaultRecoveryTest {
      * Two of the four filenames this class writes are **user-derived** — `<user>.recovery.p12` and
      * `<user>.recovery.crt` — and the sync exclusion list that is supposed to keep them off the wire
      * is a basename string comparison, so a username carrying path syntax or a decomposable character
-     * makes them displaceable exactly as `IdentityStoreDisplaceableTest` shows for `<user>.pfx`. The
+     * makes them displaceable exactly as `IdentityStoreExclusionTest` shows for `<user>.pfx`. The
      * P12 is this device's recovery private key; a peer's copy landing over a freshly written one
      * leaves it unopenable by the local record, and that surfaces only when the user finally needs
      * their recovery phrase.

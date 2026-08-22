@@ -730,11 +730,29 @@ internal class LocalPgpRepository(
                 // material; this was the same loss through a different door, and the invariant is
                 // about the artifact, not about which code path reached it. The displaced ring goes
                 // where a sync-displaced one goes, and is restorable from the same screen.
-                DirectoryBundler.preserveBeforeOverwriting(
-                    File("$pgpDir${user.userName}"),
-                    source.fileName.toString(),
+                // Staged first, displaced second, installed third - and the order is the fix.
+                //
+                // Preserving before reading the source meant that importing a file which IS the
+                // destination destroyed it: the preserve renamed it into the conflict store and the
+                // copy then read a path that no longer existed. `Files.copy(f, f)` had been a
+                // harmless no-op before, so adding the preserve turned "pick the file you already
+                // have" into data loss. Staging first also means a failed read - vanished source,
+                // full disk, bad media - happens while the live file is still live.
+                val staged = File.createTempFile(
+                    "${destination.fileName}.",
+                    DirectoryBundler.TEMP_FILE_SUFFIX,
+                    destination.parent.toFile(),
                 )
-                Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING)
+                try {
+                    Files.copy(source, staged.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                    DirectoryBundler.preserveBeforeOverwriting(
+                        File("$pgpDir${user.userName}"),
+                        source.fileName.toString(),
+                    )
+                    DurableFiles.replace(staged, destination.toFile())
+                } finally {
+                    staged.delete()
+                }
             }
 
             Outcome.Success(Unit)

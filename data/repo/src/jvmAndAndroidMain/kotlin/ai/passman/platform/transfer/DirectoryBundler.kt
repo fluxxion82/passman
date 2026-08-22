@@ -6,6 +6,7 @@ import ai.passman.keystore.KeystoreClient
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
@@ -144,11 +145,14 @@ object DirectoryBundler {
     )
 
     /**
-     * Zips every file under [sourceDir] except those whose basename matches an entry in
-     * [excludeBaseNames] or ends in [TEMP_FILE_SUFFIX]. Use the exclusion list to keep
-     * device-identity files (e.g. the user's primary login keystore `${userName}.pfx`) out of the
-     * wire bundle - syncing those would clobber the peer's RSA keypair and break decryption of its
-     * existing data.
+     * Zips every file under [sourceDir] that [exclusionsFor] does not exclude. Use the exclusion list
+     * to keep device-identity files (the user's login keystore `${userName}.pfx`, the device keyring,
+     * the PQ key files, the portable-recovery material) out of the wire bundle — syncing those would
+     * clobber the peer's own identity and break decryption of its existing data.
+     *
+     * Matching is by name, by resolved path AND by the filesystem's own identity for the file, not by
+     * basename alone: a name comparison missed case and Unicode form on APFS and NTFS, path syntax in
+     * a username, and a hard link entirely. See [exclusionsFor].
      */
     fun bundle(sourceDir: File, excludeBaseNames: Set<String> = emptySet()): ByteArray {
         // Rejected BEFORE the lock, and then locked unconditionally. Reading is a critical section
@@ -176,16 +180,11 @@ object DirectoryBundler {
         // it could only ever *weaken* the filter on a platform where canonicalisation does not fold
         // the way that platform's filesystem does. Refusing a file twice costs nothing; shipping a
         // private key once is unrecoverable.
-        val excludedPaths = excludedPathsIn(sourceDir, excludeBaseNames)
+        val exclusions = exclusionsFor(sourceDir, excludeBaseNames)
         val out = ByteArrayOutputStream()
         ZipOutputStream(out).use { zip ->
             sourceDir.walkTopDown()
-                .filter {
-                    it.isFile &&
-                        it.name !in excludeBaseNames &&
-                        resolvedPathOf(it) !in excludedPaths &&
-                        !it.name.endsWith(TEMP_FILE_SUFFIX)
-                }
+                .filter { it.isFile && !exclusions.excludes(it) }
                 .forEach { file ->
                     val entryName = file.relativeTo(sourceDir).invariantSeparatorsPath
                     zip.putNextEntry(ZipEntry(entryName))
@@ -263,8 +262,7 @@ object DirectoryBundler {
     ) {
         destDir.mkdirs()
         val destRoot = destDir.canonicalFile.toPath()
-        val excludedResolvedNames = excludeBaseNames.mapTo(HashSet()) { it.lowercase() }
-        val excludedPaths = excludedPathsIn(destDir, excludeBaseNames)
+        val exclusions = exclusionsFor(destDir, excludeBaseNames)
         var entries = 0
         var total = 0L
 
@@ -293,14 +291,8 @@ object DirectoryBundler {
                 }
                 val safeRelative = entry.name.replace('\\', '/')
                 // The name the destination filesystem would resolve the entry to — see the KDoc.
-                val resolvedBaseName = File(safeRelative).name.trimEnd('.', ' ').lowercase()
-                // Resolved as well as named — see excludedPathsIn. `..` is rejected before the path
-                // is built, so nothing below can be asked to resolve outside destDir.
-                if (safeRelative.contains("..") ||
-                    resolvedBaseName in excludedResolvedNames ||
-                    resolvedPathOf(File(destDir, safeRelative)) in excludedPaths ||
-                    resolvedBaseName.endsWith(TEMP_FILE_SUFFIX)
-                ) {
+                // Traversal first, so nothing below can be asked to resolve outside destDir.
+                if (escapesRoot(safeRelative) || exclusions.excludes(File(destDir, safeRelative))) {
                     entry = zip.nextEntry
                     continue
                 }
@@ -402,7 +394,7 @@ object DirectoryBundler {
      * counterparts on APFS and NTFS; a username carrying a separator makes the exclusion string
      * `team/a.pfx` while the file's basename is `a.pfx`; Windows folds `alice.pfx.` onto
      * `alice.pfx`. Every one of those was a way for the identity store or a recovery key to be
-     * bundled outbound or accepted inbound, and `IdentityStoreDisplaceableTest` demonstrates three
+     * bundled outbound or accepted inbound, and `IdentityStoreExclusionTest` demonstrates three
      * of them.
      *
      * Resolving both sides and comparing paths delegates the question to the thing that answers it.
@@ -413,6 +405,76 @@ object DirectoryBundler {
      */
     private fun excludedPathsIn(directory: File, excludeBaseNames: Set<String>): Set<String> =
         excludeBaseNames.mapTo(HashSet()) { resolvedPathOf(File(directory, it)) }
+
+    /**
+     * The exclusion test for one directory, resolved once and then asked per file.
+     *
+     * There is exactly one implementation because there were four sites doing this by hand —
+     * [bundle], [unbundle], [restorePreserved] and, missing it entirely, the local keystore import.
+     * That last omission is what makes this worth extracting rather than tidying: import refused only
+     * the identity store, so a file named `keyring.pmk` was accepted, displaced the live device
+     * keyring, and left the master key unopenable — while [restorePreserved] then refused to put it
+     * back, on the premise that an excluded file is never displaced. Import had quietly falsified
+     * that premise.
+     *
+     * Resolution is what makes it correct and a name comparison is what makes it safe on a platform
+     * whose canonicalisation does not fold the way its filesystem does; the union can only refuse
+     * more. Names are trimmed of trailing dots and spaces and folded to lower case because Windows
+     * resolves `alice.pfx.` and `ALICE.PFX` onto `alice.pfx`.
+     */
+    fun exclusionsFor(directory: File, excludeBaseNames: Set<String>): SyncExclusions =
+        SyncExclusions(
+            names = excludeBaseNames.mapTo(HashSet()) { it.lowercase() },
+            paths = excludedPathsIn(directory, excludeBaseNames),
+            fileKeys = excludeBaseNames.mapNotNullTo(HashSet()) { fileKeyOf(File(directory, it)) },
+        )
+
+    /**
+     * The filesystem's own identity for [file] — device and inode on POSIX — or null where the
+     * platform does not expose one.
+     *
+     * This is what catches a **hard link**, which neither comparison above can see: a hard link is an
+     * independent directory entry for the same inode, so `canonicalPath` returns the link's own path
+     * and the name is whatever it was called. `shared.pfx` linked to `alice.pfx` therefore matched
+     * nothing and was zipped into an outbound bundle — the account's RSA private key on the wire,
+     * under an innocent name.
+     *
+     * Nothing in this app creates hard links in an artifact directory. A backup tool, a restore, or a
+     * sync client that de-duplicates by linking will, and none of those know this file is special.
+     * That is the case worth closing: not an attacker, who could read the key directly anyway, but an
+     * ordinary tool making an ordinary optimisation.
+     *
+     * Null on filesystems that do not report a key, which is why it only ever *adds* refusals.
+     */
+    private fun fileKeyOf(file: File): Any? = runCatching {
+        Files.readAttributes(file.toPath(), BasicFileAttributes::class.java).fileKey()
+    }.getOrNull()
+
+    /** Built by [exclusionsFor]. Cheap to ask, so it can sit in a per-file filter. */
+    class SyncExclusions internal constructor(
+        private val names: Set<String>,
+        private val paths: Set<String>,
+        private val fileKeys: Set<Any>,
+    ) {
+        fun excludes(candidate: File): Boolean {
+            val resolvedBaseName = candidate.name.trimEnd('.', ' ').lowercase()
+            return resolvedBaseName in names ||
+                resolvedBaseName.endsWith(TEMP_FILE_SUFFIX) ||
+                resolvedPathOf(candidate) in paths ||
+                fileKeyOf(candidate)?.let { it in fileKeys } == true
+        }
+    }
+
+    /**
+     * Whether [relative] escapes its root — a `..` **path component**, not the substring.
+     *
+     * `contains("..")` also matched innocent names like `backup..pfx`, which produced a silent
+     * one-way sync hole: `bundle` shipped such a file on every push and every peer's `unbundle`
+     * dropped it without a word, so the user watched it never arrive and had nothing to look at.
+     * Traversal is a property of components, so that is what is checked.
+     */
+    private fun escapesRoot(relative: String): Boolean =
+        relative.split('/', File.separatorChar).any { it == ".." }
 
     /** Absolute is the fallback, never the raw path: a relative one resolves against the CWD. */
     private fun resolvedPathOf(file: File): String =
@@ -543,7 +605,17 @@ object DirectoryBundler {
      * @return the preserved copy, or null when nothing was live at that path.
      */
     fun preserveBeforeOverwriting(destDir: File, relative: String): File? = withDestinationLock(destDir) {
-        preserveDisplaced(File(destDir, relative), destDir, relative)
+        // Confined like every other path this object accepts from a caller. Both callers pass a bare
+        // filename today, so this is not reachable - but a public entry point that renames a live
+        // file wherever it is pointed is an unsafe contract to leave lying around, and `unbundle` and
+        // `restorePreserved` both check exactly this.
+        val target = File(destDir, relative)
+        if (escapesRoot(relative) ||
+            !target.canonicalFile.toPath().startsWith(destDir.canonicalFile.toPath())
+        ) {
+            return@withDestinationLock null
+        }
+        preserveDisplaced(target, destDir, relative)
     }
 
     /**
@@ -622,17 +694,14 @@ object DirectoryBundler {
         val relative = originalPathOf(preserved)
         // Matched exactly as unbundle matches an inbound entry name, so the two cannot disagree about
         // what "an excluded file" means and let a path in through one door that the other refuses.
-        val resolvedBaseName = File(relative).name.trimEnd('.', ' ').lowercase()
-        if (resolvedBaseName in excludeBaseNames.mapTo(HashSet()) { it.lowercase() } ||
-            resolvedPathOf(File(destDir, relative)) in excludedPathsIn(destDir, excludeBaseNames) ||
-            resolvedBaseName.endsWith(TEMP_FILE_SUFFIX)
-        ) {
+        // Traversal before resolution, matching unbundle's order.
+        if (escapesRoot(relative) || exclusionsFor(destDir, excludeBaseNames).excludes(File(destDir, relative))) {
             return@withDestinationLock false
         }
         val target = File(destDir, relative)
         // Same confinement unbundle applies to a peer-authored entry name. The path here comes off a
         // filename on disk, which a user can edit, so it gets checked like anything else untrusted.
-        if (relative.contains("..") || !target.canonicalFile.toPath().startsWith(destDir.canonicalFile.toPath())) {
+        if (escapesRoot(relative) || !target.canonicalFile.toPath().startsWith(destDir.canonicalFile.toPath())) {
             return@withDestinationLock false
         }
 

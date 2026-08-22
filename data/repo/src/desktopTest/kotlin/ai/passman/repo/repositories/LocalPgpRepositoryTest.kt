@@ -495,6 +495,28 @@ class LocalPgpRepositoryTest {
         )
     }
 
+    /**
+     * Importing a file that IS the destination leaves it alone.
+     *
+     * A file picker points at the key directory as readily as anywhere else, so "import the ring you
+     * already have" is a thing a user does. `Files.copy(f, f, REPLACE_EXISTING)` had always been a
+     * harmless no-op — until the preserve was added ahead of it, which renamed the file into the
+     * conflict store and left the copy reading a path that no longer existed. The ring vanished from
+     * the live directory and the user was told only that the import failed.
+     *
+     * Staging the source before displacing anything is what makes it safe, and it is why this asserts
+     * the ring is still live rather than merely that the call succeeded.
+     */
+    @Test
+    fun importPgpFile_importingTheLiveRingItselfIsANoOp() = runBlocking {
+        val live = File(pgpUserDir, "self_public.asc").apply { writeBytes(publicRingFile.readBytes()) }
+
+        repository.importPgpFile(live.absolutePath)
+
+        assertTrue(live.isFile, "the ring the user pointed at must still be there")
+        assertContentEquals(publicRingFile.readBytes(), live.readBytes(), "and unchanged")
+    }
+
     /** The ordinary case still writes straight through, with nothing to preserve. */
     @Test
     fun importPgpFile_preservesNothingWhenTheNameIsFree() = runBlocking {

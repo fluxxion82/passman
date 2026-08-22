@@ -4,6 +4,7 @@ import ai.passman.crypto.Crypto
 import ai.passman.crypto.CryptoKey
 import ai.passman.domain.connectivity.model.TrustedDevice
 import ai.passman.crypto.io.ArtifactDirectoryLock
+import ai.passman.crypto.io.DurableFiles
 import ai.passman.keystore.KeystoreClient
 import ai.passman.keystore.model.Keystore
 import ai.passman.cache.KeyCacheManager
@@ -114,6 +115,17 @@ class LocalKeystoreRepository(
         if (target.name.toByteArray().size > MAX_FILE_NAME_BYTES) {
             return "that name is too long"
         }
+        // Everything sync refuses, refused here too — the identity store is one member of that set,
+        // not the whole of it. Import used to check only the identity store, so a file named
+        // `keyring.pmk`, `hybrid.key`, `mldsa.key` or `<user>.recovery.p12` was accepted: it
+        // displaced this device's own identity material and left the master key unopenable, with
+        // `getAllKeystores` never listing those names so the import looked like a no-op. Worse since
+        // import began preserving what it replaces, because `restorePreserved` refuses excluded names
+        // on the premise that an excluded file is never displaced — a premise import had falsified,
+        // stranding the copy where only export could reach it.
+        if (DirectoryBundler.exclusionsFor(directory, DirectoryBundler.syncExclusions(userName)).excludes(target)) {
+            return "that name is reserved for this device's identity; choose another"
+        }
         val identity = KeystoreClient.identityStoreName(userName)
         if (target == canonicalOf(File(directory, identity))) {
             return "that name is reserved for your account's identity; choose another"
@@ -217,11 +229,29 @@ class LocalKeystoreRepository(
                 // Same as the PGP import: the source's filename can land on a keystore already
                 // there, and REPLACE_EXISTING destroyed it. Preserved instead, into the store the
                 // recovery screen reads.
-                DirectoryBundler.preserveBeforeOverwriting(
-                    File("$keystoreDir${user.userName}"),
-                    source.fileName.toString(),
+                // Staged first, displaced second, installed third - and the order is the fix.
+                //
+                // Preserving before reading the source meant that importing a file which IS the
+                // destination destroyed it: the preserve renamed it into the conflict store and the
+                // copy then read a path that no longer existed. `Files.copy(f, f)` had been a
+                // harmless no-op before, so adding the preserve turned "pick the file you already
+                // have" into data loss. Staging first also means a failed read - vanished source,
+                // full disk, bad media - happens while the live file is still live.
+                val staged = File.createTempFile(
+                    "${destination.fileName}.",
+                    DirectoryBundler.TEMP_FILE_SUFFIX,
+                    destination.parent.toFile(),
                 )
-                Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING)
+                try {
+                    Files.copy(source, staged.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                    DirectoryBundler.preserveBeforeOverwriting(
+                        File("$keystoreDir${user.userName}"),
+                        source.fileName.toString(),
+                    )
+                    DurableFiles.replace(staged, destination.toFile())
+                } finally {
+                    staged.delete()
+                }
             }
 
             Outcome.Success(Unit)

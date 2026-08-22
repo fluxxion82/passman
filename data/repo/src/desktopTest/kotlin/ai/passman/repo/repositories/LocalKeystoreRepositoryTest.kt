@@ -224,6 +224,12 @@ class LocalKeystoreRepositoryTest {
             listed.none { it.contains(preserved.name.take(32)) },
             "nor under any other spelling of the same copy",
         )
+        // Positive half. Absence assertions alone are satisfied by a listing that returns nothing,
+        // so this pins that the listing still does its job while excluding the copy.
+        assertTrue(
+            keystoreName in listed,
+            "and the account's real keystore must still be listed",
+        )
     }
 
     @Test
@@ -629,6 +635,47 @@ class LocalKeystoreRepositoryTest {
             preserved.single().readBytes(),
             "and the keystore it replaced was kept, not destroyed",
         )
+    }
+
+    /** Importing a keystore that IS the destination leaves it alone — see the PGP twin. */
+    @Test
+    fun importKeystoreFile_importingTheLiveKeystoreItselfIsANoOp() = runBlocking {
+        val bytes = ByteArray(64) { 0x3B }
+        val live = File(keystoreDir, "self.pfx").apply { writeBytes(bytes) }
+
+        repository.importKeystoreFile(live.absolutePath)
+
+        assertTrue(live.isFile, "the keystore the user pointed at must still be there")
+        assertContentEquals(bytes, live.readBytes(), "and unchanged")
+    }
+
+    /**
+     * Every file sync refuses is refused on import too, not just the identity store.
+     *
+     * The device keyring, the PQ key files and the portable-recovery material are this device's
+     * identity. Importing over one leaves the master key unopenable, and because none of them appear
+     * in any listing the import looks like it did nothing at all. Since import began preserving what
+     * it replaces, it was worse than an overwrite: `restorePreserved` refuses excluded names on the
+     * premise that an excluded file is never displaced, so the copy was stranded where only export
+     * could reach it.
+     */
+    @Test
+    fun importKeystoreFile_refusesEveryFileSyncExcludes() = runBlocking {
+        listOf(
+            DirectoryBundler.KEYRING_FILE_NAME,
+            DirectoryBundler.HYBRID_KEY_FILE_NAME,
+            DirectoryBundler.ML_DSA_KEY_FILE_NAME,
+            DirectoryBundler.portableRecoveryP12Name("alice"),
+        ).forEach { name ->
+            val live = File(keystoreDir, name).apply { writeBytes(ByteArray(32) { 0x11 }) }
+            val incoming = File(localDir, name).apply { writeBytes(ByteArray(16) { 0x22 }) }
+
+            assertIs<Outcome.Error>(
+                repository.importKeystoreFile(incoming.absolutePath),
+                "\"$name\" is device identity and must not be importable",
+            )
+            assertContentEquals(ByteArray(32) { 0x11 }, live.readBytes(), "and $name must be untouched")
+        }
     }
 
     /**

@@ -89,7 +89,7 @@ class JvmKeyStoreClient : KeystoreClient {
      * Both are needed on those two paths because the two locks are **not** disjoint. The sync
      * exclusion list was believed to keep `<user>.pfx` out of every bundle, which would have meant
      * `unbundle` could never touch it — but that list compares basename strings while the filesystem
-     * resolves paths, and `IdentityStoreDisplaceableTest` shows three ways they disagree on the
+     * resolves paths, and `IdentityStoreExclusionTest` shows three ways they disagree on the
      * identity store's own name. A user-added keystore named after the account lands on it too.
      *
      * The order is this-then-[IdentityStoreLock] because [IdentityStoreLock] is bounded, fails
