@@ -10,4 +10,4 @@ RUN apt-get update \
     && mkdir -p /home/gradle/.gradle \
     && chmod -R a+rwx /home/gradle
 
-WORKDIR /workspace/passmanClient
+WORKDIR /workspace
